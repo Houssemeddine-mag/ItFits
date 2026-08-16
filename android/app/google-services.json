@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "133083240626",
+    "project_id": "itfits-ai",
+    "storage_bucket": "itfits-ai.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:133083240626:android:767a45628abfcdf8f511ab",
+        "android_client_info": {
+          "package_name": "com.itfits.app"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "133083240626-a11bseb0jfrbadhfu747ahno1of2tvnj.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.itfits.app",
+            "certificate_hash": "c246a2ce14c42a19f61b433938989b0cbc18f03a"
+          }
+        },
+        {
+          "client_id": "133083240626-3dmk70jrf6ackkg0go7usk2rhgp72s7c.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBEnO7QBjaDze2KARo7P0I4gdDLOeOr1Aw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "133083240626-3dmk70jrf6ackkg0go7usk2rhgp72s7c.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
