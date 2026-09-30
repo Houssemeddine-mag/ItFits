@@ -128,7 +128,7 @@ class OrientationService {
       sensorsValid: stable && hasOrientation,
       yawDeg: _yaw0 == null
           ? 0
-          : wrapAngleDeg((_yaw! - _yaw0!) * 180.0 / math.pi),
+          : wrapAngleDeg((_yaw0! - _yaw!) * 180.0 / math.pi),
       pitchDeg: _yaw0 == null ? 0 : (_pitch! - _pitch0!) * 180.0 / math.pi,
     );
     _controller.add(_latest!);

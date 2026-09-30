@@ -137,11 +137,12 @@ void main() {
   });
 
   test('pure yaw delta rotates the view by that yaw', () {
+    // In dchs_motion_sensors, turning right decreases yaw, so yaw0 > yaw is a right turn (+0.5 rad).
     final q = relativeQuatFromDeltas(
-      yaw: 0.5, yaw0: 0.0, pitch: 0.0, pitch0: 0.0, roll: 0.0, roll0: 0.0);
+      yaw: 0.0, yaw0: 0.5, pitch: 0.0, pitch0: 0.0, roll: 0.0, roll0: 0.0);
     final fwd = q.rotate(const [0, 0, -1]);
-    // Yaw +0.5 rad about Y maps forward to (-sin, 0, -cos).
-    expect(fwd[0], closeTo(-0.4794, 1e-3));
+    // Right turn rotates forward (-Z) towards +X (right).
+    expect(fwd[0], closeTo(0.4794, 1e-3));
     expect(fwd[1], closeTo(0, 1e-9));
     expect(fwd[2], closeTo(-0.8776, 1e-3));
   });

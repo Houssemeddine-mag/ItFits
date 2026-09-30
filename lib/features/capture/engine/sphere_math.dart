@@ -16,8 +16,9 @@ class Quat {
   static const identity = Quat(0, 0, 0, 1);
 
   /// Rotation of [angleRad] about the Y axis (yaw).
+  /// Right-turning / clockwise: +yaw moves the camera forward (-Z) towards +X (right).
   factory Quat.yaw(double angleRad) {
-    final h = angleRad / 2;
+    final h = -angleRad / 2;
     return Quat(0, math.sin(h), 0, math.cos(h));
   }
 
@@ -215,7 +216,9 @@ Quat relativeQuatFromDeltas({
   required double roll,
   required double roll0,
 }) {
-  final dy = wrapAngleDeg((yaw - yaw0) * 180.0 / math.pi) * math.pi / 180.0;
+  // In dchs_motion_sensors on Android, yaw decreases as device rotates clockwise (to the right).
+  // Negating (yaw - yaw0) makes right turns positive, matching SphereTarget's clockwise tour.
+  final dy = wrapAngleDeg((yaw0 - yaw) * 180.0 / math.pi) * math.pi / 180.0;
   final dp = (pitch - pitch0);
   final dr = (roll - roll0);
   return (Quat.yaw(dy) * Quat.pitch(dp) * _rollQuat(dr)).normalized;
