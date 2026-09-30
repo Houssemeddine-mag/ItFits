@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/legacy.dart';
 import 'package:go_router/go_router.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 
@@ -11,7 +12,7 @@ final historyProjectsProvider = StreamProvider<List<ProjectModel>>((ref) {
   final projectService = ref.read(projectServiceProvider);
   final authService = ref.read(authServiceProvider);
   final user = authService.currentUser;
-  if (user == null) return const Stream.empty();
+  if (user == null) return Stream.value(const <ProjectModel>[]);
   return projectService.watchUserProjects(user.uid);
 });
 

@@ -23,7 +23,15 @@ class _DummyUser implements User {
 class AuthService {
   late final FirebaseAuth _auth;
   late final FirebaseFirestore _firestore;
-  final GoogleSignIn _googleSignIn = GoogleSignIn();
+  // google_sign_in v7 uses a singleton + explicit initialize(). The flag
+  // guarantees initialize() runs exactly once, as the plugin requires.
+  bool _googleInitialized = false;
+
+  Future<void> _ensureGoogleInitialized() async {
+    if (_googleInitialized) return;
+    await GoogleSignIn.instance.initialize();
+    _googleInitialized = true;
+  }
   final bool _isDummy;
   User? _dummyUser;
   final ValueNotifier<bool> _authNotifier = ValueNotifier(false);
@@ -33,7 +41,11 @@ class AuthService {
         _firestore = firestore,
         _isDummy = false;
 
-  AuthService.dummy() : _isDummy = true;
+  AuthService.dummy()
+      : _isDummy = true,
+        // Start demo mode already signed in so project creation and
+        // navigation work without Firebase configuration.
+        _dummyUser = const _DummyUser();
 
   ValueNotifier<bool> get authNotifier => _authNotifier;
 
@@ -114,18 +126,23 @@ class AuthService {
       return null;
     }
     try {
-      final GoogleSignInAccount? googleUser = await _googleSignIn.signIn();
-      if (googleUser == null) return null;
+      await _ensureGoogleInitialized();
+      final GoogleSignInAccount googleUser =
+          await GoogleSignIn.instance.authenticate();
 
-      final GoogleSignInAuthentication googleAuth = await googleUser.authentication;
+      // v7 exposes only the ID token here; it is sufficient for Firebase.
+      final GoogleSignInAuthentication googleAuth = googleUser.authentication;
       final credential = GoogleAuthProvider.credential(
-        accessToken: googleAuth.accessToken,
         idToken: googleAuth.idToken,
       );
 
       final userCredential = await _auth.signInWithCredential(credential);
       await _createUserProfile(userCredential.user!);
       return userCredential;
+    } on GoogleSignInException catch (e) {
+      // User cancelled the flow: behave like the old null return.
+      if (e.code == GoogleSignInExceptionCode.canceled) return null;
+      throw Exception('Google sign-in failed: ${e.description ?? e.code.name}');
     } on FirebaseAuthException catch (e) {
       throw _handleAuthException(e);
     }
@@ -164,7 +181,12 @@ class AuthService {
       _authNotifier.value = !_authNotifier.value;
       return;
     }
-    await _googleSignIn.signOut();
+    try {
+      await _ensureGoogleInitialized();
+      await GoogleSignIn.instance.signOut();
+    } catch (_) {
+      // Sign-out must never fail (e.g. Google never initialized).
+    }
     await _auth.signOut();
   }
 

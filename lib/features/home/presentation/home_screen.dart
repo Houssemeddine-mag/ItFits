@@ -11,7 +11,7 @@ final homeProjectsProvider = StreamProvider<List<ProjectModel>>((ref) {
   final projectService = ref.read(projectServiceProvider);
   final authService = ref.read(authServiceProvider);
   final user = authService.currentUser;
-  if (user == null) return const Stream.empty();
+  if (user == null) return Stream.value(const <ProjectModel>[]);
   return projectService.watchUserProjects(user.uid);
 });
 

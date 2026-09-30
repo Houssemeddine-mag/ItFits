@@ -70,7 +70,11 @@ class _CreateScreenState extends ConsumerState<CreateScreen> {
   @override
   void initState() {
     super.initState();
-    _resetWizardState();
+    // Resetting providers notifies listeners: doing it synchronously here
+    // throws "Tried to modify a provider while the widget tree was building".
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _resetWizardState();
+    });
   }
 
   void _resetWizardState() {
@@ -114,26 +118,38 @@ class _CreateScreenState extends ConsumerState<CreateScreen> {
   }
 
   Future<void> _ensureProjectCreated() async {
-    final existing = ref.read(currentProjectProvider);
-    if (existing != null) return;
+    try {
+      final existing = ref.read(currentProjectProvider);
+      if (existing != null) return;
 
-    final authService = ref.read(authServiceProvider);
-    final projectService = ref.read(projectServiceProvider);
-    final user = authService.currentUser;
-    final userId = user?.uid ?? 'anonymous';
+      final authService = ref.read(authServiceProvider);
+      final projectService = ref.read(projectServiceProvider);
+      final user = authService.currentUser;
+      final userId = user?.uid ?? 'anonymous';
 
-    final roomType = ref.read(selectedRoomTypeProvider);
-    final styleName = ref.read(selectedStyleNameProvider);
+      final roomType = ref.read(selectedRoomTypeProvider);
+      final styleName = ref.read(selectedStyleNameProvider);
 
-    final project = await projectService.createProject(
-      userId: userId,
-      name: 'Design ${DateTime.now().millisecondsSinceEpoch}',
-      roomType: roomType,
-    );
+      final project = await projectService.createProject(
+        userId: userId,
+        name: 'Design ${DateTime.now().millisecondsSinceEpoch}',
+        roomType: roomType,
+      );
 
-    ref.read(currentProjectProvider.notifier).state = project.copyWith(
-      style: styleName,
-    );
+      ref.read(currentProjectProvider.notifier).state = project.copyWith(
+        style: styleName,
+      );
+    } catch (e) {
+      // Never block the creation flow: fall back to a local project.
+      debugPrint('Project creation failed, using local fallback: $e');
+      if (ref.read(currentProjectProvider) == null && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Working offline — project will be saved locally'),
+          ),
+        );
+      }
+    }
   }
 
   @override

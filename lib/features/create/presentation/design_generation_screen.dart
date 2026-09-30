@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/legacy.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 
 import 'package:itfits/core/services/providers.dart';
@@ -32,7 +33,11 @@ class _DesignGenerationScreenState extends ConsumerState<DesignGenerationScreen>
       vsync: this,
       duration: const Duration(seconds: 2),
     )..repeat();
-    _startGeneration();
+    // _startGeneration writes providers: defer past the build phase, same
+    // reason as CreateScreen._resetWizardState.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _startGeneration();
+    });
   }
 
   @override

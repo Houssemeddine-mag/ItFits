@@ -1,18 +1,41 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:uuid/uuid.dart';
 
 import '../models/project_model.dart';
 
 class ProjectService {
-  late final FirebaseFirestore _firestore;
+  final FirebaseFirestore? _firestore;
   final Uuid _uuid = const Uuid();
   final bool _isDummy;
+
+  /// In-memory store so project creation works without Firebase (demo mode).
+  final List<ProjectModel> _dummyProjects = [];
+  late final StreamController<List<ProjectModel>> _dummyController;
 
   ProjectService(FirebaseFirestore firestore)
       : _firestore = firestore,
         _isDummy = false;
 
-  ProjectService.dummy() : _isDummy = true;
+  ProjectService.dummy() : _firestore = null, _isDummy = true {
+    _dummyController = StreamController<List<ProjectModel>>.broadcast(
+      onListen: () => _emitDummy(),
+    );
+  }
+
+  void _emitDummy() {
+    if (!_dummyController.isClosed) {
+      _dummyController.add(List<ProjectModel>.unmodifiable(_dummyProjects));
+    }
+  }
+
+  List<ProjectModel> _dummyUserProjects(String userId) {
+    final list = _dummyProjects.where((p) => p.userId == userId).toList();
+    list.sort((a, b) => (b.updatedAt ?? DateTime.fromMillisecondsSinceEpoch(0))
+        .compareTo(a.updatedAt ?? DateTime.fromMillisecondsSinceEpoch(0)));
+    return list;
+  }
 
   Future<ProjectModel> createProject({
     required String userId,
@@ -20,13 +43,16 @@ class ProjectService {
     required String roomType,
   }) async {
     if (_isDummy) {
-      return _dummyProject(userId, name, roomType);
+      final project = _dummyProject(userId, name, roomType);
+      _dummyProjects.insert(0, project);
+      _emitDummy();
+      return project;
     }
     final projectId = _uuid.v4();
     final project = _dummyProject(userId, name, roomType, id: projectId);
 
     try {
-      await _firestore
+      await _firestore!
           .collection('users')
           .doc(userId)
           .collection('projects')
@@ -58,9 +84,17 @@ class ProjectService {
   }
 
   Future<void> updateProject(ProjectModel project) async {
-    if (_isDummy) return;
+    if (_isDummy) {
+      final index = _dummyProjects.indexWhere((p) => p.id == project.id);
+      if (index != -1) {
+        _dummyProjects[index] =
+            project.copyWith(updatedAt: DateTime.now());
+        _emitDummy();
+      }
+      return;
+    }
     try {
-      await _firestore
+      await _firestore!
           .collection('users')
           .doc(project.userId)
           .collection('projects')
@@ -70,9 +104,18 @@ class ProjectService {
   }
 
   Future<void> updateProjectStatus(String userId, String projectId, ProjectStatus status) async {
-    if (_isDummy) return;
+    if (_isDummy) {
+      final index = _dummyProjects
+          .indexWhere((p) => p.id == projectId && p.userId == userId);
+      if (index != -1) {
+        _dummyProjects[index] = _dummyProjects[index]
+            .copyWith(status: status, updatedAt: DateTime.now());
+        _emitDummy();
+      }
+      return;
+    }
     try {
-      await _firestore
+      await _firestore!
           .collection('users')
           .doc(userId)
           .collection('projects')
@@ -85,9 +128,21 @@ class ProjectService {
   }
 
   Future<void> updateFloorPlan(String userId, String projectId, FloorPlanModel floorPlan) async {
-    if (_isDummy) return;
+    if (_isDummy) {
+      final index = _dummyProjects
+          .indexWhere((p) => p.id == projectId && p.userId == userId);
+      if (index != -1) {
+        _dummyProjects[index] = _dummyProjects[index].copyWith(
+          floorPlan: floorPlan,
+          status: ProjectStatus.reviewingPlan,
+          updatedAt: DateTime.now(),
+        );
+        _emitDummy();
+      }
+      return;
+    }
     try {
-      await _firestore
+      await _firestore!
           .collection('users')
           .doc(userId)
           .collection('projects')
@@ -106,9 +161,26 @@ class ProjectService {
       required int accentColor,
       required int backgroundColor,
       required int surfaceColor}) async {
-    if (_isDummy) return;
+    if (_isDummy) {
+      final index = _dummyProjects
+          .indexWhere((p) => p.id == projectId && p.userId == userId);
+      if (index != -1) {
+        _dummyProjects[index] = _dummyProjects[index].copyWith(
+          style: style,
+          primaryColor: primaryColor,
+          secondaryColor: secondaryColor,
+          accentColor: accentColor,
+          backgroundColor: backgroundColor,
+          surfaceColor: surfaceColor,
+          status: ProjectStatus.styling,
+          updatedAt: DateTime.now(),
+        );
+        _emitDummy();
+      }
+      return;
+    }
     try {
-      await _firestore
+      await _firestore!
           .collection('users')
           .doc(userId)
           .collection('projects')
@@ -127,9 +199,22 @@ class ProjectService {
   }
 
   Future<void> addGeneratedDesign(String userId, String projectId, GeneratedDesignModel design) async {
-    if (_isDummy) return;
+    if (_isDummy) {
+      final index = _dummyProjects
+          .indexWhere((p) => p.id == projectId && p.userId == userId);
+      if (index != -1) {
+        final current = _dummyProjects[index];
+        _dummyProjects[index] = current.copyWith(
+          generatedDesigns: [...?current.generatedDesigns, design],
+          status: ProjectStatus.complete,
+          updatedAt: DateTime.now(),
+        );
+        _emitDummy();
+      }
+      return;
+    }
     try {
-      await _firestore
+      await _firestore!
           .collection('users')
           .doc(userId)
           .collection('projects')
@@ -143,9 +228,14 @@ class ProjectService {
   }
 
   Future<void> deleteProject(String userId, String projectId) async {
-    if (_isDummy) return;
+    if (_isDummy) {
+      _dummyProjects
+          .removeWhere((p) => p.id == projectId && p.userId == userId);
+      _emitDummy();
+      return;
+    }
     try {
-      await _firestore
+      await _firestore!
           .collection('users')
           .doc(userId)
           .collection('projects')
@@ -155,8 +245,15 @@ class ProjectService {
   }
 
   Stream<ProjectModel?> watchProject(String userId, String projectId) {
-    if (_isDummy) return const Stream.empty();
-    return _firestore
+    if (_isDummy) {
+      return _dummyController.stream.map((projects) {
+        for (final p in projects) {
+          if (p.id == projectId && p.userId == userId) return p;
+        }
+        return null;
+      });
+    }
+    return _firestore!
         .collection('users')
         .doc(userId)
         .collection('projects')
@@ -169,8 +266,11 @@ class ProjectService {
   }
 
   Stream<List<ProjectModel>> watchUserProjects(String userId) {
-    if (_isDummy) return const Stream.empty();
-    return _firestore
+    if (_isDummy) {
+      return _dummyController.stream
+          .map((_) => _dummyUserProjects(userId));
+    }
+    return _firestore!
         .collection('users')
         .doc(userId)
         .collection('projects')
@@ -182,9 +282,9 @@ class ProjectService {
   }
 
   Future<List<ProjectModel>> getUserProjects(String userId) async {
-    if (_isDummy) return [];
+    if (_isDummy) return _dummyUserProjects(userId);
     try {
-      final snapshot = await _firestore
+      final snapshot = await _firestore!
           .collection('users')
           .doc(userId)
           .collection('projects')

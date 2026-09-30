@@ -161,7 +161,7 @@ class FirestoreImageService {
     required String userId,
     required String projectId,
   }) {
-    if (_isDummy) return const Stream.empty();
+    if (_isDummy) return Stream.value(const <CapturedImageData>[]);
     return _firestore!
         .collection(_imagesCollection(userId, projectId))
         .orderBy('order')
@@ -223,7 +223,7 @@ class FirestoreImageService {
     required String userId,
     required String projectId,
   }) {
-    if (_isDummy) return const Stream.empty();
+    if (_isDummy) return Stream.value(const <GeneratedDesignData>[]);
     return _firestore!
         .collection(_designsCollection(userId, projectId))
         .orderBy('createdAt', descending: true)
