@@ -24,10 +24,13 @@ class ItFitsApp extends ConsumerWidget {
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   try {
+    // Uses google-services.json on Android.
+    // For iOS/macOS/Web, run `flutterfire configure` to generate
+    // firebase_options.dart and pass DefaultFirebaseOptions.currentPlatform.
     await Firebase.initializeApp();
     firebaseReady = true;
   } catch (e) {
-    debugPrint('Firebase init failed: $e');
+    debugPrint('Firebase init failed (running in offline mode): $e');
   }
   runApp(const ProviderScope(child: ItFitsApp()));
 }

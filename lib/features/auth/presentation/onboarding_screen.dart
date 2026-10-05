@@ -159,16 +159,18 @@ class _OnboardingPageContent extends StatelessWidget {
 
     return Padding(
       padding: const EdgeInsets.all(24),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Container(
-            width: 280,
-            height: 280,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(24),
-              color: page.color.withOpacity(0.1),
-            ),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 240,
+              height: 240,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(24),
+                color: page.color.withOpacity(0.1),
+              ),
             child: ClipRRect(
               borderRadius: BorderRadius.circular(24),
               child: page.useLocalAsset
@@ -188,7 +190,7 @@ class _OnboardingPageContent extends StatelessWidget {
                     ),
             ),
           ).animate().fadeIn(duration: 500.ms).scale(delay: 200.ms),
-          const SizedBox(height: 40),
+          const SizedBox(height: 24),
           Text(
             page.title,
             style: theme.textTheme.displaySmall?.copyWith(
@@ -196,7 +198,7 @@ class _OnboardingPageContent extends StatelessWidget {
             ),
             textAlign: TextAlign.center,
           ).animate().fadeIn(delay: 300.ms).slideY(begin: 0.2),
-          const SizedBox(height: 16),
+          const SizedBox(height: 12),
           Text(
             page.description,
             style: theme.textTheme.bodyLarge?.copyWith(
@@ -205,7 +207,8 @@ class _OnboardingPageContent extends StatelessWidget {
             ),
             textAlign: TextAlign.center,
           ).animate().fadeIn(delay: 400.ms).slideY(begin: 0.2),
-        ],
+          ],
+        ),
       ),
     );
   }

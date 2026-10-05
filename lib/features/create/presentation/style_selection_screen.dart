@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
 
+import 'package:itfits/core/models/project_model.dart';
 import 'package:itfits/core/services/providers.dart';
 
 final selectedStyleProvider = StateProvider<String?>((ref) => null);
@@ -733,6 +736,36 @@ class _StyleSelectionScreenState extends ConsumerState<StyleSelectionScreen> {
         secondaryColor: palette.length > 1 ? palette[1] : project.secondaryColor,
         accentColor: palette.length > 2 ? palette[2] : project.accentColor,
       );
+      // Persist so an unfinished project keeps its style + stage.
+      unawaited(_persistStyleToCloud(
+        styleName: styleName,
+        palette: List<int>.from(palette),
+        project: project,
+      ));
+    }
+  }
+
+  Future<void> _persistStyleToCloud({
+    required String styleName,
+    required List<int> palette,
+    required ProjectModel project,
+  }) async {
+    try {
+      final user = ref.read(authServiceProvider).currentUser;
+      if (user == null) return;
+      await ref.read(projectServiceProvider).updateStyle(
+            user.uid,
+            project.id,
+            styleName,
+            primaryColor: palette.isNotEmpty ? palette[0] : project.primaryColor,
+            secondaryColor:
+                palette.length > 1 ? palette[1] : project.secondaryColor,
+            accentColor: palette.length > 2 ? palette[2] : project.accentColor,
+            backgroundColor: project.backgroundColor,
+            surfaceColor: project.surfaceColor,
+          );
+    } catch (e) {
+      debugPrint('Style persist failed: $e');
     }
   }
 }

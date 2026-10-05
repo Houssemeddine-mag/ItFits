@@ -52,7 +52,9 @@ GoRouter createRouter(AuthService authService) {
           ),
           GoRoute(
             path: '/create',
-            builder: (context, state) => const CreateScreen(),
+            builder: (context, state) => CreateScreen(
+              resumeProjectId: state.uri.queryParameters['resume'],
+            ),
           ),
           GoRoute(
             path: '/history',

@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -9,10 +11,16 @@ import 'package:itfits/features/create/presentation/style_selection_screen.dart'
 import 'package:itfits/features/create/presentation/ai_chat_screen.dart';
 import 'package:itfits/features/create/presentation/design_generation_screen.dart';
 import 'package:itfits/features/create/presentation/design_result_screen.dart';
+import 'package:itfits/core/models/project_model.dart';
 import 'package:itfits/core/services/providers.dart';
+import 'package:itfits/core/services/project_stage.dart'
+    show floorPlanDataFromModel, floorPlanModelFromData, stepIndexForStatus;
 
 class CreateScreen extends ConsumerStatefulWidget {
-  const CreateScreen({super.key});
+  /// When set, resumes this existing project instead of starting a new one.
+  final String? resumeProjectId;
+
+  const CreateScreen({super.key, this.resumeProjectId});
 
   @override
   ConsumerState<CreateScreen> createState() => _CreateScreenState();
@@ -21,6 +29,7 @@ class CreateScreen extends ConsumerStatefulWidget {
 class _CreateScreenState extends ConsumerState<CreateScreen> {
   final PageController _pageController = PageController();
   int _currentStep = 0;
+  bool _isResuming = false;
 
   final List<_CreateStep> _steps = [
     _CreateStep(
@@ -71,7 +80,13 @@ class _CreateScreenState extends ConsumerState<CreateScreen> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _resetWizardState();
+      if (!mounted) return;
+      final resumeId = widget.resumeProjectId;
+      if (resumeId != null && resumeId.isNotEmpty) {
+        _resumeProject(resumeId);
+      } else {
+        _resetWizardState();
+      }
     });
   }
 
@@ -147,9 +162,157 @@ class _CreateScreenState extends ConsumerState<CreateScreen> {
     }
   }
 
+  Future<void> _persistStage(ProjectStatus status) async {
+    try {
+      final project = ref.read(currentProjectProvider);
+      final user = ref.read(authServiceProvider).currentUser;
+      if (project == null || user == null) return;
+      if (project.status == status) return;
+      await ref
+          .read(projectServiceProvider)
+          .updateProjectStatus(user.uid, project.id, status);
+      ref.read(currentProjectProvider.notifier).state =
+          project.copyWith(status: status);
+    } catch (e) {
+      debugPrint('Stage persist failed: $e');
+    }
+  }
+
+  /// Saves the edited floor plan to the project (marks it as reviewed).
+  Future<void> _persistFloorPlan() async {
+    try {
+      final plan = ref.read(floorPlanDataProvider);
+      final project = ref.read(currentProjectProvider);
+      final user = ref.read(authServiceProvider).currentUser;
+      if (plan == null || project == null || user == null) return;
+      await ref
+          .read(projectServiceProvider)
+          .updateFloorPlan(user.uid, project.id, floorPlanModelFromData(plan));
+      ref.read(currentProjectProvider.notifier).state =
+          project.copyWith(status: ProjectStatus.reviewingPlan);
+    } catch (e) {
+      debugPrint('Floor plan persist failed: $e');
+    }
+  }
+
+  /// Uploads scan images early so the 360 capture exists even for
+  /// unfinished projects. Generation reuses these ids (no duplicates).
+  Future<void> _saveScanImages() async {
+    try {
+      final project = ref.read(currentProjectProvider);
+      final user = ref.read(authServiceProvider).currentUser;
+      if (project == null || user == null) return;
+      if (ref.read(capturedImageIdsProvider).isNotEmpty) return;
+      final images = ref.read(capturedImagesProvider);
+      if (images.isEmpty) return;
+      final bytesList = images.map((b64) {
+        final data = b64.contains(',') ? b64.split(',').last : b64;
+        return base64Decode(data);
+      }).toList();
+      final saved = await ref
+          .read(firestoreImageServiceProvider)
+          .saveCapturedImages(
+            userId: user.uid,
+            projectId: project.id,
+            imageBytesList: bytesList,
+          );
+      ref.read(capturedImageIdsProvider.notifier).state =
+          saved.map((img) => img.id).toList();
+    } catch (e) {
+      debugPrint('Scan image save failed: $e');
+    }
+  }
+
+  /// Restores wizard state for an unfinished project and jumps to its stage.
+  Future<void> _resumeProject(String projectId) async {
+    setState(() => _isResuming = true);
+    try {
+      final authService = ref.read(authServiceProvider);
+      final projectService = ref.read(projectServiceProvider);
+      final imageService = ref.read(firestoreImageServiceProvider);
+      final user = authService.currentUser;
+      if (user == null) {
+        _resetWizardState();
+        return;
+      }
+      final projects = await projectService.getUserProjects(user.uid);
+      ProjectModel? found;
+      for (final p in projects) {
+        if (p.id == projectId) found = p;
+      }
+      final project = found;
+      if (project == null || !mounted) {
+        if (mounted) _resetWizardState();
+        return;
+      }
+      ref.read(currentProjectProvider.notifier).state = project;
+      ref.read(selectedRoomTypeProvider.notifier).state =
+          project.roomType.isNotEmpty ? project.roomType : 'Living Room';
+      if (project.style.isNotEmpty) {
+        ref.read(selectedStyleNameProvider.notifier).state = project.style;
+        ref.read(selectedPaletteProvider2.notifier).state = [
+          project.primaryColor,
+          project.secondaryColor,
+          project.accentColor,
+        ];
+      }
+      if (project.floorPlan != null) {
+        try {
+          ref.read(floorPlanDataProvider.notifier).state =
+              floorPlanDataFromModel(project.floorPlan!);
+        } catch (e) {
+          debugPrint('Floor plan restore failed: $e');
+        }
+      }
+      try {
+        final saved = await imageService.getCapturedImages(
+          userId: user.uid,
+          projectId: project.id,
+        );
+        if (saved.isNotEmpty && mounted) {
+          ref.read(capturedImagesProvider.notifier).state = saved
+              .map((img) => 'data:image/jpeg;base64,${img.base64Data}')
+              .toList();
+          ref.read(capturedImageIdsProvider.notifier).state =
+              saved.map((img) => img.id).toList();
+        }
+      } catch (e) {
+        debugPrint('Captured image restore failed: $e');
+      }
+      final step = stepIndexForStatus(project.status);
+      if (mounted) {
+        setState(() {
+          _currentStep = step;
+          _isResuming = false;
+        });
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && _pageController.hasClients) {
+            _pageController.jumpToPage(step);
+          }
+        });
+        return;
+      }
+    } finally {
+      if (mounted) setState(() => _isResuming = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    if (_isResuming) {
+      return const Scaffold(
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(height: 16),
+              Text('Resuming your project...'),
+            ],
+          ),
+        ),
+      );
+    }
 
     return Scaffold(
       body: Column(
@@ -170,19 +333,35 @@ class _CreateScreenState extends ConsumerState<CreateScreen> {
                   onComplete: (images) async {
                     ref.read(capturedImagesProvider.notifier).state = images;
                     await _ensureProjectCreated();
+                    await _saveScanImages();
+                    await _persistStage(ProjectStatus.scanning);
                     _goToStep(1);
                   },
                 ),
                 PanoramaViewerScreen(
-                  onComplete: () => _goToStep(2),
+                  onComplete: () async {
+                    await _persistStage(ProjectStatus.processing);
+                    _goToStep(2);
+                  },
                   onBack: () => _goToStep(0),
                 ),
                 FloorPlanCombinedScreen(
-                  onComplete: () => _goToStep(3),
+                  onComplete: () async {
+                    await _persistFloorPlan();
+                    _goToStep(3);
+                  },
                   onBack: () => _goToStep(1),
                 ),
-                StyleSelectionScreen(onComplete: () => _goToStep(4), onBack: () => _goToStep(2)),
-                AiChatScreen(onComplete: () => _goToStep(5)),
+                StyleSelectionScreen(
+                    onComplete: () async {
+                      await _persistStage(ProjectStatus.styling);
+                      _goToStep(4);
+                    },
+                    onBack: () => _goToStep(2)),
+                AiChatScreen(onComplete: () async {
+                  await _persistStage(ProjectStatus.generating);
+                  _goToStep(5);
+                }),
                 DesignGenerationScreen(onComplete: () => _goToStep(6)),
                 const DesignResultScreen(),
               ],

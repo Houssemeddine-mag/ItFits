@@ -59,21 +59,24 @@ class _DesignGenerationScreenState extends ConsumerState<DesignGenerationScreen>
         ref.read(generationStageProvider.notifier).state = 'Uploading images...';
         ref.read(generationProgressProvider.notifier).state = 0.1;
 
-        try {
-          final imageBytesList = capturedImages.map((b64) {
-            final data = b64.contains(',') ? b64.split(',').last : b64;
-            return base64Decode(data);
-          }).toList();
+        // Scan step already uploads; reuse those ids instead of duplicating.
+        if (ref.read(capturedImageIdsProvider).isEmpty) {
+          try {
+            final imageBytesList = capturedImages.map((b64) {
+              final data = b64.contains(',') ? b64.split(',').last : b64;
+              return base64Decode(data);
+            }).toList();
 
-          final savedImages = await imageService.saveCapturedImages(
-            userId: user.uid,
-            projectId: project.id,
-            imageBytesList: imageBytesList,
-          );
+            final savedImages = await imageService.saveCapturedImages(
+              userId: user.uid,
+              projectId: project.id,
+              imageBytesList: imageBytesList,
+            );
 
-          ref.read(capturedImageIdsProvider.notifier).state =
-              savedImages.map((img) => img.id).toList();
-        } catch (_) {
+            ref.read(capturedImageIdsProvider.notifier).state =
+                savedImages.map((img) => img.id).toList();
+          } catch (_) {
+          }
         }
       }
 
