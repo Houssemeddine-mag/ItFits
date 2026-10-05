@@ -100,23 +100,30 @@ dart run build_runner build --delete-conflicting-outputs
 
 ## The 360 capture pipeline
 
-1. **Lattice** (`sphere_math.dart`) — 12 stops in tour order: 6 × horizon
-   (60° steps), 2 × upper (+50°), 2 × lower (−50°), zenith, nadir.
+1. **Lattice** (`sphere_math.dart`) — 22 stops in tour order: 8 × horizon
+   (45° steps), 6 × upper (+45°), 6 × lower (−45°), zenith, nadir. Sized
+   for a portrait phone main camera (~53° × 67°); a unit test checks it
+   covers >99% of the sphere with 3° of aim error.
 2. **Pose tracking** (`orientation_service.dart`) — game rotation vector
    (gyro + accelerometer, magnetometer-free so indoor readings stay
-   smooth), deltas measured from the latched start frame; gyro-magnitude
-   gate for steadiness.
-3. **Acquisition** (`room_scan_screen.dart`) — ghost-frame guidance, one-tap
-   capture per stop, AE/AF locked from frame #1, full-res JPEGs spooled to
-   a temp directory.
-4. **Stitch** (`sphere_stitcher.dart`) — pose-driven equirectangular warp +
-   feather blend in an isolate, JPEG encode, GPano XMP `APP1` injection.
+   smooth), rebuilt into a full rotation matrix (Euler-angle deltas break
+   at the upright-portrait gimbal lock) and expressed in a gravity-level
+   frame latched at start, so the horizon is straight. Aim error is the
+   view-direction angle, so roll is free (ceiling/floor from any heading).
+3. **Acquisition** (`room_scan_screen.dart`) — portrait-locked guidance,
+   full-sensor 4:3 capture, exposure locked after frame #1, each frame
+   natively downscaled in the background with its EXIF focal length kept
+   for the field of view.
+4. **Stitch** (`sphere_stitcher.dart`) — pose-driven equirectangular warp
+   with per-frame FOV, rectangular feather blend and hole filling in an
+   isolate, JPEG encode, GPano XMP `APP1` injection.
 
 ## Configuration
 
 | Key                | Where                                        | Notes                        |
 | ------------------ | -------------------------------------------- | ---------------------------- |
-| `OPENROUTER_API_KEY` | `--dart-define` at run/build time          | Enables AI chat; app degrades gracefully without it |
+| `OPENROUTER_API_KEY`, `HF_TOKEN` | Cloud Functions secrets: `firebase functions:secrets:set …` | Never in the app. AI chat/auto-detect (`aiChat`) and photo redesigns (`generateDesign`) go through `functions/`; the app falls back to local tips / text-only images without them |
+| `FUNCTIONS_BASE_URL` | optional `--dart-define`                   | Defaults to `https://us-central1-itfits-ai.cloudfunctions.net`; point at the emulator for local testing |
 | Firebase           | `android/app/google-services.json`           | Included; without network the app runs in demo mode |
 | Google Sign-In     | Firebase console OAuth clients               | v7 plugin API (`initialize()` + `authenticate()`) |
 

@@ -99,19 +99,16 @@ class PromptBuilder {
 
     final parts = <String>[];
 
-    // Core scene description — detailed
     parts.add(
       'A stunning $style interior design photograph of a beautifully designed $roomType. '
       'The space features $styleDesc. '
       '$roomDesc.',
     );
 
-    // Floor plan spatial details
     if (floorPlan != null) {
       parts.add(_buildSpatialDescription(floorPlan, roomType));
     }
 
-    // Color palette
     if (paletteDescription != null && paletteDescription.isNotEmpty) {
       parts.add(
         'Cohesive color palette featuring $paletteDescription tones '
@@ -119,13 +116,11 @@ class PromptBuilder {
       );
     }
 
-    // User preferences
     if (preferences != null && preferences.isNotEmpty) {
       final uniquePrefs = preferences.toSet().toList();
       parts.add('Special design requirements: ${uniquePrefs.join("; ")}.');
     }
 
-    // Lighting and atmosphere
     if (floorPlan != null && floorPlan.windows.isNotEmpty) {
       final windowDir = _getWindowDirection(floorPlan);
       parts.add(
@@ -142,7 +137,6 @@ class PromptBuilder {
       );
     }
 
-    // Material realism
     parts.add(
       'Every surface displays photorealistic material quality: '
       'wood grain visible on furniture, fabric weave texture on upholstery, '
@@ -151,7 +145,6 @@ class PromptBuilder {
       'stone veining on countertops, metal patina on fixtures.',
     );
 
-    // Composition and atmosphere
     parts.add(
       'Professional interior photography composition with leading lines, '
       'rule of thirds, and depth layering from foreground to background. '
@@ -172,14 +165,12 @@ class PromptBuilder {
       '(${floorPlan.area.toStringAsFixed(1)} square meters total).',
     );
 
-    // Walls
     if (floorPlan.walls.isNotEmpty) {
       buffer.writeln(
         'The room has ${floorPlan.walls.length} walls defining the space.',
       );
     }
 
-    // Windows with direction and light quality
     if (floorPlan.windows.isNotEmpty) {
       for (final window in floorPlan.windows) {
         final dir = _getWindowDirectionForWall(floorPlan, window.wallIndex);
@@ -192,7 +183,6 @@ class PromptBuilder {
       }
     }
 
-    // Doors with swing
     if (floorPlan.doors.isNotEmpty) {
       for (final door in floorPlan.doors) {
         final dir = _getWindowDirectionForWall(floorPlan, door.wallIndex);
@@ -204,7 +194,6 @@ class PromptBuilder {
       }
     }
 
-    // Outlets
     if (floorPlan.outlets.isNotEmpty) {
       final firstOutlet = floorPlan.outlets.first;
       final outletDir = _getWindowDirectionForWall(floorPlan, firstOutlet.wallIndex);
@@ -214,7 +203,6 @@ class PromptBuilder {
       );
     }
 
-    // Furniture placement guidance
     buffer.writeln(floorPlan.toFurnitureGuidance(roomType));
 
     return buffer.toString();
@@ -238,8 +226,6 @@ class PromptBuilder {
     );
   }
 
-  /// Builds an equirectangular panoramic prompt designed for 360° spherical viewing.
-  /// The image output is 2:1 aspect ratio (equirectangular projection).
   static String buildPanoramicDesignPrompt({
     required FloorPlanData floorPlan,
     required String style,
@@ -261,7 +247,6 @@ class PromptBuilder {
       'The space features $styleDesc. $roomDesc.',
     );
 
-    // Spatial layout — describe each wall for 360° context
     parts.add(_buildPanoramicSpatialDescription(floorPlan, roomType));
 
     if (paletteDesc.isNotEmpty) {
@@ -276,7 +261,6 @@ class PromptBuilder {
       parts.add('Special design requirements: ${uniquePrefs.join("; ")}.');
     }
 
-    // Lighting — panoramic needs balanced lighting from all directions
     if (floorPlan.windows.isNotEmpty) {
       final windowDir = _getWindowDirection(floorPlan);
       parts.add(
@@ -307,7 +291,6 @@ class PromptBuilder {
     return parts.join(' ');
   }
 
-  /// Spatial description optimized for panoramic prompts — describes wall-by-wall layout.
   static String _buildPanoramicSpatialDescription(FloorPlanData floorPlan, String roomType) {
     final buffer = StringBuffer();
 
@@ -318,7 +301,6 @@ class PromptBuilder {
       'Ceiling height: ${floorPlan.ceilingHeight.toStringAsFixed(1)}m.',
     );
 
-    // Describe each wall position-by-position
     final wallNames = ['south (bottom of panorama)', 'east (right side)', 'north (top of panorama)', 'west (left side)'];
 
     for (int i = 0; i < 4; i++) {

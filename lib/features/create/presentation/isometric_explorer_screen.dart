@@ -135,7 +135,7 @@ class _IsometricExplorerScreenState extends ConsumerState<IsometricExplorerScree
   }
 
   void _handlePanUpdate(DragUpdateDetails details) {
-    if (_isRotating) return; // long press is handling rotation
+    if (_isRotating) return;
     if (_lastPanPosition != null) {
       final dx = details.localPosition.dx - _lastPanPosition!.dx;
       final dy = details.localPosition.dy - _lastPanPosition!.dy;

@@ -1,6 +1,9 @@
+import 'dart:async';
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
+import 'ai_proxy_service.dart';
 import 'prompt_builder.dart';
 import '../models/floor_plan_data.dart';
 
@@ -19,7 +22,11 @@ class GeneratedDesignResult {
 }
 
 class AiDesignService {
-  AiDesignService();
+  final AiProxyService _proxy;
+
+  AiDesignService(this._proxy);
+
+  static const _pollinationsTimeout = Duration(seconds: 120);
 
   static const String _negativePrompt =
       'worst quality, blurry, low resolution, pixelated, distorted, '
@@ -61,7 +68,21 @@ class AiDesignService {
 
     final fullPrompt = '$prompt $_panoramicQualitySuffix';
 
-    final imageUrl = await _generatePanoramicImage(fullPrompt);
+    String? imageUrl;
+    final photo = imageUrls.where((u) => u.startsWith('data:image/')).firstOrNull;
+    if (photo != null && _proxy.isAvailable) {
+      try {
+        imageUrl = await _proxy.generateDesign(
+          imageDataUrl: photo,
+          prompt: prompt,
+          style: style,
+          roomType: roomType,
+        );
+      } on AiProxyException catch (e) {
+        debugPrint('Photo-based generation unavailable, using text-only: $e');
+      }
+    }
+    imageUrl ??= await _generatePanoramicImage(fullPrompt);
 
     return GeneratedDesignResult(
       imageUrl: imageUrl,
@@ -92,7 +113,6 @@ class AiDesignService {
     final encodedPrompt = Uri.encodeComponent(prompt);
     final encodedNegative = Uri.encodeComponent(_negativePrompt);
 
-    // 2:1 equirectangular ratio for proper 360° panoramic images
     final pollinationsUrl =
         'https://image.pollinations.ai/prompt/$encodedPrompt'
         '?width=2048&height=1024'
@@ -103,10 +123,17 @@ class AiDesignService {
         '&nofeed=true'
         '&seed=-1';
 
-    final response = await http.get(Uri.parse(pollinationsUrl));
+    final http.Response response;
+    try {
+      response = await http
+          .get(Uri.parse(pollinationsUrl))
+          .timeout(_pollinationsTimeout);
+    } on TimeoutException {
+      throw Exception('Image generation timed out. Please try again.');
+    }
 
     if (response.statusCode != 200) {
-      throw Exception('AI generation failed: ${response.statusCode}');
+      throw Exception('Image generation failed (${response.statusCode}).');
     }
 
     return 'data:image/jpeg;base64,${base64Encode(response.bodyBytes)}';

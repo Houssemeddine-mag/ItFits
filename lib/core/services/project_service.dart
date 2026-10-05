@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart';
 import 'package:uuid/uuid.dart';
 
 import '../models/project_model.dart';
@@ -10,7 +11,6 @@ class ProjectService {
   final Uuid _uuid = const Uuid();
   final bool _isDummy;
 
-  /// In-memory store so project creation works without Firebase (demo mode).
   final List<ProjectModel> _dummyProjects = [];
   late final StreamController<List<ProjectModel>> _dummyController;
 
@@ -59,7 +59,7 @@ class ProjectService {
           .doc(projectId)
           .set(project.toJson());
     } catch (e) {
-      // Return project locally even if Firestore write fails
+      debugPrint('Project save failed, continuing locally: $e');
     }
 
     return project;
@@ -235,13 +235,41 @@ class ProjectService {
       return;
     }
     try {
-      await _firestore!
-          .collection('users')
-          .doc(userId)
-          .collection('projects')
-          .doc(projectId)
-          .delete();
+      await deleteProjectTree(_firestore!, userId, projectId);
     } catch (_) {}
+  }
+
+  static const _projectSubcollections = ['images', 'designs'];
+
+  static Future<void> deleteProjectTree(
+      FirebaseFirestore db, String userId, String projectId) async {
+    final project =
+        db.collection('users').doc(userId).collection('projects').doc(projectId);
+    for (final name in _projectSubcollections) {
+      await _deleteCollection(project.collection(name));
+    }
+    await project.delete();
+  }
+
+  static Future<void> deleteUserTree(FirebaseFirestore db, String userId) async {
+    final user = db.collection('users').doc(userId);
+    final projects = await user.collection('projects').get();
+    for (final p in projects.docs) {
+      await deleteProjectTree(db, userId, p.id);
+    }
+    await user.delete();
+  }
+
+  static Future<void> _deleteCollection(CollectionReference col) async {
+    while (true) {
+      final page = await col.limit(400).get();
+      if (page.docs.isEmpty) return;
+      final batch = col.firestore.batch();
+      for (final d in page.docs) {
+        batch.delete(d.reference);
+      }
+      await batch.commit();
+    }
   }
 
   Stream<ProjectModel?> watchProject(String userId, String projectId) {

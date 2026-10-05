@@ -1,11 +1,14 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:math' as math;
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:path_provider/path_provider.dart';
@@ -16,21 +19,6 @@ import 'package:itfits/features/capture/engine/orientation_service.dart';
 import 'package:itfits/features/capture/engine/sphere_math.dart';
 import 'package:itfits/features/capture/engine/sphere_stitcher.dart';
 
-/// ---------------------------------------------------------------------------
-/// Guided offline 360° photo-sphere capture — v2 (redesigned UX).
-///
-/// Key changes from v1:
-///   • Nearest-target selection (via [selectStickyTarget]) instead of rigid
-///     tour order — users sweep naturally and the guide follows.
-///   • Directional arrow (far) + color-coded reticle (close) instead of a
-///     confusing ghost-frame overlay.
-///   • Large capture button at the bottom (like every camera app) instead of
-///     a circle blocking the center of the preview.
-///   • Spatial radar mini-map replacing the abstract dot rows.
-///   • Undo last shot (3-second window).
-///   • Ring-transition banners ("Now tilt UP ↑", etc.).
-///   • 20 FPS UI refresh (was 8 FPS) for smoother guidance.
-/// ---------------------------------------------------------------------------
 class RoomScanScreen extends ConsumerStatefulWidget {
   final Function(List<String>) onComplete;
 
@@ -42,42 +30,44 @@ class RoomScanScreen extends ConsumerStatefulWidget {
 
 class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
     with WidgetsBindingObserver {
-  // ── Constants ──────────────────────────────────────────────────────────────
 
-  // Relaxed auto-fire bonus gates (manual capture has NO gates at all).
-  static const double autoFireThresholdDeg = 11.0;
+  static const double autoFireThresholdDeg = 6.0;
   static const double autoFireGyroLimit = 0.20;
   static const Duration autoFireHold = Duration(milliseconds: 320);
-  static const double horizontalFovDeg = 70;
   static const Duration shutterCooldown = Duration(milliseconds: 800);
 
-  /// Minimum frames before stitching is offered (the 6-shot horizon ring).
-  static const int minShotsToStitch = 6;
+  static const double manualCaptureMaxDeg = 15.0;
 
-  /// Within this angle: green "aligned" state, auto-fire can kick in.
-  static const double _alignedDeg = 11.0;
+  static const int minShotsToStitch = 8;
 
-  /// Pixels of screen offset per degree of angular error.
+  static const double _alignedDeg = 7.0;
+
+  static const int _workingShortEdge = 960;
+
   static const double _pxPerDeg = 12.0;
 
-  // ── Camera & sensors ──────────────────────────────────────────────────────
 
   CameraController? _cameraController;
   bool _isCameraInitialized = false;
   bool _hasPermission = false;
   bool _cameraUnavailable = false;
 
+  Future<void>? _cameraInit;
+
+  CameraFov _fov = CameraFov.typical;
+
   final OrientationService _orientation = OrientationService();
   StreamSubscription<PoseSample>? _poseSub;
   PoseSample? _pose;
   DateTime _lastUiUpdate = DateTime.fromMillisecondsSinceEpoch(0);
 
-  // ── Capture state ─────────────────────────────────────────────────────────
 
-  /// Tour-ordered lattice.
   final List<SphereTarget> _targets = buildSphereLattice();
   final Set<String> _done = {};
-  final List<SphereShot> _shots = [];
+
+  final LinkedHashMap<String, SphereShot> _shots = LinkedHashMap();
+
+  final Map<String, Future<void>> _shotPrep = {};
   Directory? _shotDir;
 
   SphereTarget? _current;
@@ -99,28 +89,23 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
   Timer? _focusTimer;
   bool _showShutterFlash = false;
 
-  // ── Undo ──────────────────────────────────────────────────────────────────
 
   bool _undoAvailable = false;
   Timer? _undoTimer;
   SphereTarget? _lastCapturedTarget;
 
-  // ── Ring transition prompt ────────────────────────────────────────────────
 
   String? _ringPrompt;
   bool _ringPromptVisible = false;
   Timer? _ringPromptTimer;
 
-  // ═════════════════════════════════════════════════════════════════════════
-  // LIFECYCLE
-  // ═════════════════════════════════════════════════════════════════════════
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    // Capturing a sphere takes a while — never let the screen sleep mid-flow.
     WakelockPlus.enable();
+    SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
     _startSession();
   }
 
@@ -128,6 +113,7 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     WakelockPlus.disable();
+    SystemChrome.setPreferredOrientations(const []);
     _poseSub?.cancel();
     _orientation.dispose();
     _cameraController?.dispose();
@@ -147,17 +133,17 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.inactive) {
-      _cameraController?.dispose();
+      if (_cameraInit != null) return;
+      final controller = _cameraController;
+      if (controller == null) return;
       _cameraController = null;
       if (mounted) setState(() => _isCameraInitialized = false);
+      controller.dispose();
     } else if (state == AppLifecycleState.resumed) {
-      _initCamera();
+      if (_cameraController == null) _initCamera();
     }
   }
 
-  // ═════════════════════════════════════════════════════════════════════════
-  // SESSION & CAMERA
-  // ═════════════════════════════════════════════════════════════════════════
 
   Future<void> _startSession() async {
     final tmp = await getTemporaryDirectory();
@@ -169,7 +155,11 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
     await _initCamera();
   }
 
-  Future<void> _initCamera() async {
+  Future<void> _initCamera() {
+    return _cameraInit ??= _doInitCamera().whenComplete(() => _cameraInit = null);
+  }
+
+  Future<void> _doInitCamera() async {
     try {
       final permission = await Permission.camera.request();
       if (!permission.isGranted) {
@@ -188,16 +178,21 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
       );
       final controller = CameraController(
         rear,
-        ResolutionPreset.high,
+        ResolutionPreset.max,
         enableAudio: false,
       );
       await controller.initialize();
+      if (!mounted) {
+        await controller.dispose();
+        return;
+      }
       _cameraController = controller;
       try {
         await controller.setFocusMode(FocusMode.auto);
       } catch (_) {}
       try {
-        await controller.setExposureMode(ExposureMode.auto);
+        await controller.setExposureMode(
+            _shots.isEmpty ? ExposureMode.auto : ExposureMode.locked);
       } catch (_) {}
       if (mounted) setState(() => _isCameraInitialized = true);
     } catch (_) {
@@ -210,9 +205,6 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
     }
   }
 
-  // ═════════════════════════════════════════════════════════════════════════
-  // POSE TRACKING & TARGET SELECTION
-  // ═════════════════════════════════════════════════════════════════════════
 
   void _onPose(PoseSample pose) {
     _pose = pose;
@@ -222,7 +214,6 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
     }
     _updateCurrent();
     final now = DateTime.now();
-    // 50 ms throttle → ~20 FPS guidance (was 120 ms / 8 FPS).
     if (now.difference(_lastUiUpdate) > const Duration(milliseconds: 50)) {
       _lastUiUpdate = now;
       if (mounted) setState(() {});
@@ -230,11 +221,6 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
     _maybeAutoFire();
   }
 
-  /// Nearest undone target with hysteresis via [selectStickyTarget].
-  ///
-  /// v1 forced a rigid tour order (first open stop in list). v2 lets the user
-  /// sweep naturally — the system follows their motion and always guides to
-  /// the nearest uncaptured target.
   void _updateCurrent() {
     final pose = _pose;
     if (pose == null) return;
@@ -254,9 +240,7 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
       return;
     }
     final rel = pose.relative.normalized;
-    _currentErrDeg = angularDistanceDeg(rel, next.orientation);
-    // Project target view direction into the current camera frame.
-    // rel maps camera -> start frame; rel.conjugated maps start frame -> camera.
+    _currentErrDeg = viewAngleDeg(rel, next);
     final vCam = (rel.conjugated * next.orientation).rotate(const [0, 0, -1]);
     _currentYawErrDeg = math.atan2(vCam[0], -vCam[2]) * 180.0 / math.pi;
     _currentPitchErrDeg =
@@ -264,12 +248,7 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
     _currentBehind = vCam[2] >= 0;
   }
 
-  // ═════════════════════════════════════════════════════════════════════════
-  // AUTO-FIRE
-  // ═════════════════════════════════════════════════════════════════════════
 
-  /// Quiet bonus only: fires when the phone sits steady on the current stop.
-  /// Manual capture below never waits for any of this.
   void _maybeAutoFire() {
     if (!_autoFire || _isCapturing || _stitching) {
       _resetLock();
@@ -307,15 +286,21 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
     _lockProgress = 0;
   }
 
-  // ═════════════════════════════════════════════════════════════════════════
-  // CAPTURE & UNDO
-  // ═════════════════════════════════════════════════════════════════════════
 
-  /// One tap, always works: captures the current stop instantly.
   Future<void> _captureManual() async {
     if (_isCapturing || _stitching) return;
     final target = _current;
     if (target == null) return;
+    if (_currentErrDeg > manualCaptureMaxDeg) {
+      HapticFeedback.heavyImpact();
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(const SnackBar(
+          content: Text('Aim at the green target first'),
+          duration: Duration(milliseconds: 1200),
+        ));
+      return;
+    }
     await _captureShot(target);
   }
 
@@ -332,23 +317,30 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
       });
     }
     HapticFeedback.mediumImpact();
+    final quat = pose.relative.normalized.toList();
+    final isFirst = _shots.isEmpty;
     try {
       final shot = await controller.takePicture();
-      final dest = '${_shotDir!.path}/${target.id}.jpg';
+      final dest = '${_shotDir!.path}/${target.id}_'
+          '${DateTime.now().microsecondsSinceEpoch}.jpg';
       await shot.saveTo(dest);
-      _shots.add(SphereShot(
-        filePath: dest,
-        quatRelative: pose.relative.normalized.toList(),
-      ));
+      try {
+        await File(shot.path).delete();
+      } catch (_) {}
+      _shots[target.id] = SphereShot(filePath: dest, quatRelative: quat);
+      _shotPrep[target.id] = _prepareShot(target.id, dest, quat);
       _done.add(target.id);
       _lastCapturedTarget = target;
 
-      // Keep focus in auto mode so subsequent shots at different room distances stay sharp!
+      if (isFirst) {
+        try {
+          await controller.setExposureMode(ExposureMode.locked);
+        } catch (_) {}
+      }
       try {
         await controller.setFocusMode(FocusMode.auto);
       } catch (_) {}
 
-      // Tactile shutter flash
       if (mounted) {
         setState(() => _showShutterFlash = true);
         Future.delayed(const Duration(milliseconds: 100), () {
@@ -359,8 +351,6 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
       HapticFeedback.lightImpact();
       _lastCapture = DateTime.now();
 
-      // Detect ring transition: check if the next target is in a different
-      // ring than the one just captured, and show a helpful prompt.
       final nextTarget = selectStickyTarget(
         targets: _targets,
         done: _done,
@@ -371,7 +361,6 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
         _showRingPrompt(nextTarget.ring);
       }
 
-      // Enable undo for 3 seconds.
       if (mounted) setState(() => _undoAvailable = true);
       _undoTimer = Timer(const Duration(seconds: 3), () {
         if (mounted) setState(() => _undoAvailable = false);
@@ -387,6 +376,50 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
     }
   }
 
+  Future<void> _prepareShot(String id, String path, List<double> quat) async {
+    try {
+      await _prepareShotUnsafe(id, path, quat);
+    } catch (e) {
+      debugPrint('Shot preparation skipped for $id: $e');
+    }
+  }
+
+  Future<void> _prepareShotUnsafe(
+      String id, String path, List<double> quat) async {
+    final focal = await Isolate.run(
+        () => readFocal35mm(File(path).readAsBytesSync()));
+    if (focal != null && mounted) {
+      setState(() => _fov = CameraFov.from35mm(focal, 4 / 3));
+    }
+    var finalPath = path;
+    try {
+      final small = path.replaceFirst(RegExp(r'\.jpg$'), '_w.jpg');
+      final out = await FlutterImageCompress.compressAndGetFile(
+        path,
+        small,
+        minWidth: _workingShortEdge,
+        minHeight: _workingShortEdge,
+        quality: 92,
+        autoCorrectionAngle: true,
+        keepExif: false,
+      );
+      if (out != null) {
+        finalPath = out.path;
+        try {
+          await File(path).delete();
+        } catch (_) {}
+      }
+    } catch (_) {}
+    if (_shots[id]?.filePath == path) {
+      _shots[id] =
+          SphereShot(filePath: finalPath, quatRelative: quat, focal35mm: focal);
+    } else if (finalPath != path) {
+      try {
+        await File(finalPath).delete();
+      } catch (_) {}
+    }
+  }
+
   void _undoLastShot() {
     if (!_undoAvailable || _lastCapturedTarget == null || _shots.isEmpty) {
       return;
@@ -394,10 +427,13 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
     _undoTimer?.cancel();
     final target = _lastCapturedTarget!;
     _done.remove(target.id);
-    _shots.removeLast();
+    final removed = _shots.remove(target.id);
+    _shotPrep.remove(target.id);
     try {
-      final file = File('${_shotDir!.path}/${target.id}.jpg');
-      if (file.existsSync()) file.deleteSync();
+      if (removed != null) {
+        final file = File(removed.filePath);
+        if (file.existsSync()) file.deleteSync();
+      }
     } catch (_) {}
     HapticFeedback.lightImpact();
     if (mounted) {
@@ -408,21 +444,26 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
     }
   }
 
-  // ═════════════════════════════════════════════════════════════════════════
-  // STITCH
-  // ═════════════════════════════════════════════════════════════════════════
 
   Future<void> _stitchAndFinish() async {
     if (_stitching || _isCapturing || _shots.isEmpty) return;
     if (mounted) setState(() => _stitching = true);
     try {
+      await Future.wait(_shotPrep.values);
       final result = await stitchSphereOffline(
-        shots: List<SphereShot>.from(_shots),
-        hfovDeg: horizontalFovDeg,
+        shots: List<SphereShot>.from(_shots.values),
       );
       final base64Image =
           'data:image/jpeg;base64,${base64Encode(result.jpegBytes)}';
-      if (mounted) widget.onComplete([base64Image]);
+      if (!mounted) return;
+      if (result.coverage < 0.97) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(
+              '${((1 - result.coverage) * 100).round()}% of the sphere was '
+              'not captured and has been filled in'),
+        ));
+      }
+      widget.onComplete([base64Image]);
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -433,9 +474,6 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
     }
   }
 
-  // ═════════════════════════════════════════════════════════════════════════
-  // RING TRANSITION PROMPT
-  // ═════════════════════════════════════════════════════════════════════════
 
   void _showRingPrompt(SphereRing ring) {
     _ringPromptTimer?.cancel();
@@ -457,9 +495,6 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
     });
   }
 
-  // ═════════════════════════════════════════════════════════════════════════
-  // TAP-TO-FOCUS
-  // ═════════════════════════════════════════════════════════════════════════
 
   void _onTapToFocus(TapDownDetails details) async {
     final controller = _cameraController;
@@ -476,7 +511,9 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
     });
     try {
       await controller.setFocusPoint(Offset(normX, normY));
-      await controller.setExposurePoint(Offset(normX, normY));
+      if (_shots.isEmpty) {
+        await controller.setExposurePoint(Offset(normX, normY));
+      }
       await controller.setFocusMode(FocusMode.auto);
     } catch (_) {}
     _focusTimer?.cancel();
@@ -523,9 +560,6 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
     );
   }
 
-  // ═════════════════════════════════════════════════════════════════════════
-  // HELPERS
-  // ═════════════════════════════════════════════════════════════════════════
 
   String _ringLabel(SphereRing ring) => switch (ring) {
         SphereRing.equator => 'Horizon',
@@ -535,9 +569,6 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
         SphereRing.nadir => 'Floor',
       };
 
-  // ═════════════════════════════════════════════════════════════════════════
-  // BUILD
-  // ═════════════════════════════════════════════════════════════════════════
 
   @override
   Widget build(BuildContext context) {
@@ -596,7 +627,6 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
     );
   }
 
-  // ── Fallback scaffold ──────────────────────────────────────────────────
 
   Widget _messageScaffold({
     required IconData icon,
@@ -645,7 +675,6 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
     );
   }
 
-  // ── Header ─────────────────────────────────────────────────────────────
 
   Widget _buildHeader() {
     return Container(
@@ -715,7 +744,6 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
     );
   }
 
-  // ── Camera preview ─────────────────────────────────────────────────────
 
   Widget _buildCameraPreview() {
     if (!_isCameraInitialized || _cameraController == null) {
@@ -726,11 +754,19 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTapDown: _onTapToFocus,
-      child: CameraPreview(_cameraController!),
+      child: Center(child: CameraPreview(_cameraController!)),
     );
   }
 
-  // ── Guidance overlay (Target card + Center reticle with pointer) ──────────
+  double _previewWidth(Size area) {
+    final controller = _cameraController;
+    if (controller == null || !controller.value.isInitialized) {
+      return area.width;
+    }
+    final portraitAspect = 1 / controller.value.aspectRatio;
+    return math.min(area.width, area.height * portraitAspect);
+  }
+
 
   Widget _buildGuidanceOverlay() {
     return Positioned.fill(
@@ -741,18 +777,15 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
           final children = <Widget>[];
 
           if (_current != null && _orientation.hasStartFrame) {
-            // ① In-world 3D floating target aperture card
             final targetCard = _buildTargetCard(center, size);
             if (targetCard != null) {
               children.add(targetCard);
             }
 
-            // ② Center viewfinder circle with attached directional pointer
             final dx = _currentYawErrDeg * _pxPerDeg;
             final dy = -_currentPitchErrDeg * _pxPerDeg;
             children.add(_buildCenterReticle(center, dx, dy));
 
-            // ③ Hint pill
             if (_currentErrDeg > _alignedDeg) {
               children.add(_hintPill(
                 _currentBehind
@@ -784,7 +817,6 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
     );
   }
 
-  /// Center viewfinder reticle with attached directional pointer.
   Widget _buildCenterReticle(Offset center, double dx, double dy) {
     final aligned = _currentErrDeg <= _alignedDeg;
     final pointerVisible = _currentErrDeg > _alignedDeg && _current != null;
@@ -801,14 +833,13 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
           alignment: Alignment.center,
           clipBehavior: Clip.none,
           children: [
-            // Attached directional pointer pointing directly to the target
             if (pointerVisible)
               Positioned(
                 left: (circleRadius + 18) + (circleRadius + 12) * math.cos(angle) - 14,
                 top: (circleRadius + 18) + (circleRadius + 12) * math.sin(angle) - 14,
                 child: IgnorePointer(
                   child: Transform.rotate(
-                    angle: angle + math.pi / 2, // Icons.navigation points UP
+                    angle: angle + math.pi / 2,
                     child: Icon(
                       Icons.navigation_rounded,
                       color: _currentBehind
@@ -820,7 +851,6 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
                 ),
               ),
 
-            // Progress ring when holding
             if (aligned)
               SizedBox(
                 width: circleRadius * 2 + 10,
@@ -833,7 +863,6 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
                 ),
               ),
 
-            // Center aim circle (tap to capture directly when aligned)
             GestureDetector(
               onTap: aligned ? _captureManual : null,
               child: AnimatedContainer(
@@ -887,7 +916,6 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
     );
   }
 
-  /// Floating 3D target aperture card that glides onto screen.
   Widget? _buildTargetCard(Offset center, Size size) {
     final target = _current;
     final pose = _pose;
@@ -899,12 +927,11 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
     final qRel = (rel.conjugated * target.orientation).normalized;
     final vCam = qRel.rotate(const [0, 0, -1]);
 
-    // Target must be in front of the camera
     if (vCam[2] >= 0) return null;
     final zDepth = -vCam[2];
     if (zDepth < 0.05) return null;
 
-    final focal = (size.width / 2) / math.tan(70.0 * math.pi / 360.0);
+    final focal = (_previewWidth(size) / 2) / _fov.tanHalfWidth;
     final dx = (vCam[0] / zDepth) * focal;
     final dy = -(vCam[1] / zDepth) * focal;
 
@@ -914,7 +941,6 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
 
     final cardCenter = Offset(center.dx + dx, center.dy + dy);
 
-    // Skip if far outside viewport
     if (cardCenter.dx < -150 ||
         cardCenter.dx > size.width + 150 ||
         cardCenter.dy < -150 ||
@@ -969,7 +995,6 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
     );
   }
 
-  // ── Ring transition banner ─────────────────────────────────────────────
 
   Widget _buildRingBanner() {
     return Positioned(
@@ -1007,7 +1032,6 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
     );
   }
 
-  // ── Bottom controls (mini-map + capture button + toggle) ───────────────
 
   Widget _buildBottomControls(bool canStitch, bool allDone) {
     return Container(
@@ -1017,7 +1041,6 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // Stitch button.
             if (canStitch)
               Padding(
                 padding: const EdgeInsets.fromLTRB(24, 8, 24, 0),
@@ -1046,7 +1069,6 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
                   ),
                 ),
               ),
-            // Undo pill.
             if (_undoAvailable)
               Padding(
                 padding: const EdgeInsets.only(top: 6),
@@ -1066,13 +1088,11 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
                 ),
               ),
             const SizedBox(height: 6),
-            // Main row: mini-map | capture button | controls.
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
-                  // ── Sphere progress matrix ──
                   SizedBox(
                     width: 76,
                     height: 76,
@@ -1086,10 +1106,8 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
                     ),
                   ),
                   const Spacer(),
-                  // ── Capture button ──
                   _captureButton(),
                   const Spacer(),
-                  // ── Right-side controls ──
                   SizedBox(
                     width: 76,
                     child: Column(
@@ -1128,14 +1146,11 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
     );
   }
 
-  /// Time-based pulse value (0.4–1.0) for the mini-map's current-target dot.
-  /// Driven by the 20 FPS setState cycle.
   double _miniMapPulse() {
     final ms = DateTime.now().millisecondsSinceEpoch;
     return 0.4 + 0.6 * ((math.sin(ms / 500.0) + 1) / 2);
   }
 
-  /// iOS-style large capture button at the bottom.
   Widget _captureButton() {
     final active = _current != null && !_isCapturing && !_stitching;
     final aligned = _currentErrDeg <= _alignedDeg;
@@ -1152,7 +1167,6 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
         child: Stack(
           alignment: Alignment.center,
           children: [
-            // Auto-fire progress ring.
             if (holding)
               SizedBox(
                 width: 80,
@@ -1165,7 +1179,6 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
                   strokeCap: StrokeCap.round,
                 ),
               ),
-            // Outer ring.
             Container(
               width: 72,
               height: 72,
@@ -1174,7 +1187,6 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
                 border: Border.all(color: ringColor, width: 3.5),
               ),
             ),
-            // Inner circle (shrinks to rounded square while capturing).
             AnimatedContainer(
               duration: const Duration(milliseconds: 150),
               width: _isCapturing ? 30 : 58,
@@ -1203,7 +1215,6 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
     );
   }
 
-  // ── Stitching overlay ──────────────────────────────────────────────────
 
   Widget _buildStitchingOverlay() {
     return Container(
@@ -1240,9 +1251,6 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// IN-WORLD 3D TARGET APERTURE CARD PAINTER
-// ═══════════════════════════════════════════════════════════════════════════
 
 class _TargetCardPainter extends CustomPainter {
   final double cardWidth;
@@ -1271,11 +1279,9 @@ class _TargetCardPainter extends CustomPainter {
     final holePath = Path()
       ..addOval(Rect.fromCircle(center: center, radius: apertureRadius));
 
-    // Card with cutout aperture hole
     final cutoutPath =
         Path.combine(PathOperation.difference, cardPath, holePath);
 
-    // Semi-translucent card fill
     final fillPaint = Paint()
       ..color = aligned
           ? color.withValues(alpha: 0.35)
@@ -1283,14 +1289,12 @@ class _TargetCardPainter extends CustomPainter {
       ..style = PaintingStyle.fill;
     canvas.drawPath(cutoutPath, fillPaint);
 
-    // Outer border
     final borderPaint = Paint()
       ..color = color
       ..strokeWidth = aligned ? 3.0 : 2.0
       ..style = PaintingStyle.stroke;
     canvas.drawRRect(cardRRect, borderPaint);
 
-    // Aperture rim
     final apertureRimPaint = Paint()
       ..color = color.withValues(alpha: aligned ? 0.95 : 0.65)
       ..strokeWidth = aligned ? 2.5 : 1.5
@@ -1303,16 +1307,7 @@ class _TargetCardPainter extends CustomPainter {
       old.aligned != aligned || old.color != color;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// SPHERE PROGRESS MATRIX
-// ═══════════════════════════════════════════════════════════════════════════
 
-/// Spatial matrix of the capture sphere's 12 targets:
-/// • Zenith: 1 dot (top)
-/// • Upper: 2 dots
-/// • Equator: 6 dots (middle)
-/// • Lower: 2 dots
-/// • Nadir: 1 dot (bottom)
 class _SphereMatrixPainter extends CustomPainter {
   final List<SphereTarget> targets;
   final Set<String> done;
@@ -1330,13 +1325,12 @@ class _SphereMatrixPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final centerX = size.width / 2;
 
-    // Y coordinates for each tier (5 tiers)
     final rowY = [
-      size.height * 0.12, // zenith
-      size.height * 0.31, // upper
-      size.height * 0.50, // equator
-      size.height * 0.69, // lower
-      size.height * 0.88, // nadir
+      size.height * 0.12,
+      size.height * 0.31,
+      size.height * 0.50,
+      size.height * 0.69,
+      size.height * 0.88,
     ];
 
     void drawTargetDot(SphereTarget t, Offset pos) {
@@ -1344,7 +1338,6 @@ class _SphereMatrixPainter extends CustomPainter {
       final isCurrent = current != null && t.id == current!.id;
 
       if (isDone) {
-        // Neon green with subtle glow ring
         final fillPaint = Paint()..color = const Color(0xFF00E676);
         canvas.drawCircle(pos, 3.5, fillPaint);
         final haloPaint = Paint()
@@ -1353,7 +1346,6 @@ class _SphereMatrixPainter extends CustomPainter {
           ..strokeWidth = 1.0;
         canvas.drawCircle(pos, 5.2, haloPaint);
       } else if (isCurrent) {
-        // Pulsing white dot with glow
         final r = 3.8 + 1.2 * pulseValue;
         final glowPaint = Paint()
           ..color = Colors.white.withValues(alpha: 0.35 + 0.25 * pulseValue)
@@ -1363,52 +1355,33 @@ class _SphereMatrixPainter extends CustomPainter {
         final fillPaint = Paint()..color = Colors.white;
         canvas.drawCircle(pos, r, fillPaint);
       } else {
-        // Pending translucent dot
         final fillPaint = Paint()
           ..color = Colors.white.withValues(alpha: 0.24);
         canvas.drawCircle(pos, 2.5, fillPaint);
       }
     }
 
-    // 1. Zenith (1 dot)
     final zenith = targets.firstWhere(
       (t) => t.id == 'zenith',
       orElse: () => targets.first,
     );
     drawTargetDot(zenith, Offset(centerX, rowY[0]));
 
-    // 2. Upper (2 dots: up-0, up-1)
-    final upper = targets.where((t) => t.ring == SphereRing.upper).toList();
-    if (upper.isNotEmpty) {
-      final dxUpper = size.width * 0.24;
-      for (var i = 0; i < upper.length; i++) {
-        final x = centerX + (i == 0 ? -dxUpper : dxUpper);
-        drawTargetDot(upper[i], Offset(x, rowY[1]));
+    void drawRing(SphereRing ring, double y, double widthFactor) {
+      final dots = targets.where((t) => t.ring == ring).toList();
+      if (dots.isEmpty) return;
+      final w = size.width * widthFactor;
+      final spacing = w / (dots.length + 1);
+      for (var i = 0; i < dots.length; i++) {
+        drawTargetDot(
+            dots[i], Offset(centerX - w / 2 + spacing * (i + 1), y));
       }
     }
 
-    // 3. Equator (6 dots: eq-0..eq-5)
-    final equator =
-        targets.where((t) => t.ring == SphereRing.equator).toList();
-    if (equator.isNotEmpty) {
-      final spacing = size.width / (equator.length + 1);
-      for (var i = 0; i < equator.length; i++) {
-        final x = spacing * (i + 1);
-        drawTargetDot(equator[i], Offset(x, rowY[2]));
-      }
-    }
+    drawRing(SphereRing.upper, rowY[1], 0.82);
+    drawRing(SphereRing.equator, rowY[2], 1.0);
+    drawRing(SphereRing.lower, rowY[3], 0.82);
 
-    // 4. Lower (2 dots: lo-0, lo-1)
-    final lower = targets.where((t) => t.ring == SphereRing.lower).toList();
-    if (lower.isNotEmpty) {
-      final dxLower = size.width * 0.24;
-      for (var i = 0; i < lower.length; i++) {
-        final x = centerX + (i == 0 ? -dxLower : dxLower);
-        drawTargetDot(lower[i], Offset(x, rowY[3]));
-      }
-    }
-
-    // 5. Nadir (1 dot)
     final nadir = targets.firstWhere(
       (t) => t.id == 'nadir',
       orElse: () => targets.last,

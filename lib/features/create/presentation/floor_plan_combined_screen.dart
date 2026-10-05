@@ -69,7 +69,6 @@ class _FloorPlanCombinedScreenState extends ConsumerState<FloorPlanCombinedScree
               ),
             ),
             const SizedBox(width: 4),
-            // Toggle between 2D and 3D
             Container(
               decoration: BoxDecoration(
                 color: colorScheme.surfaceContainerHighest,

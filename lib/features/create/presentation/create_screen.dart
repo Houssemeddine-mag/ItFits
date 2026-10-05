@@ -70,8 +70,6 @@ class _CreateScreenState extends ConsumerState<CreateScreen> {
   @override
   void initState() {
     super.initState();
-    // Resetting providers notifies listeners: doing it synchronously here
-    // throws "Tried to modify a provider while the widget tree was building".
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _resetWizardState();
     });
@@ -91,12 +89,10 @@ class _CreateScreenState extends ConsumerState<CreateScreen> {
     ref.read(floorPlanDataProvider.notifier).state = null;
     ref.read(generatedDesignsProvider.notifier).state = [];
     ref.read(generatedDesignUrlsProvider.notifier).state = [];
-    // Also reset generation state from design_generation_screen.dart
     ref.read(generationProgressProvider.notifier).state = 0.0;
     ref.read(generationStageProvider.notifier).state = 'Preparing...';
     ref.read(isGeneratingProvider.notifier).state = false;
     ref.read(generationErrorProvider.notifier).state = null;
-    // Reset chat messages
     ref.read(chatMessagesProvider.notifier).state = [];
   }
 
@@ -140,7 +136,6 @@ class _CreateScreenState extends ConsumerState<CreateScreen> {
         style: styleName,
       );
     } catch (e) {
-      // Never block the creation flow: fall back to a local project.
       debugPrint('Project creation failed, using local fallback: $e');
       if (ref.read(currentProjectProvider) == null && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(

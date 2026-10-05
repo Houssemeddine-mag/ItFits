@@ -298,7 +298,6 @@ class _StyleSelectionScreenState extends ConsumerState<StyleSelectionScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            // Header
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
               child: Row(
@@ -319,14 +318,12 @@ class _StyleSelectionScreenState extends ConsumerState<StyleSelectionScreen> {
                 ],
               ),
             ),
-            // Scrollable content
             Expanded(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Section: Room Type
                     _SectionTitle('Room Type'),
                     const SizedBox(height: 4),
                     Text(
@@ -339,7 +336,6 @@ class _StyleSelectionScreenState extends ConsumerState<StyleSelectionScreen> {
                     _buildRoomTypeSelector(colorScheme, theme),
                     const SizedBox(height: 28),
 
-                    // Section: Design Style
                     _SectionTitle('Design Style'),
                     const SizedBox(height: 4),
                     Text(
@@ -352,7 +348,6 @@ class _StyleSelectionScreenState extends ConsumerState<StyleSelectionScreen> {
                     _buildStyleGrid(colorScheme, theme),
                     const SizedBox(height: 28),
 
-                    // Section: Color Palette (only if style selected)
                     if (selectedStyle != null) ...[
                       _SectionTitle('Color Palette'),
                       const SizedBox(height: 4),
@@ -367,7 +362,6 @@ class _StyleSelectionScreenState extends ConsumerState<StyleSelectionScreen> {
                       const SizedBox(height: 28),
                     ],
 
-                    // Section: Preferences
                     _SectionTitle('Design Preferences'),
                     const SizedBox(height: 4),
                     Text(
@@ -383,7 +377,6 @@ class _StyleSelectionScreenState extends ConsumerState<StyleSelectionScreen> {
                 ),
               ),
             ),
-            // Bottom button
             Container(
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
               decoration: BoxDecoration(
@@ -567,7 +560,6 @@ class _StyleSelectionScreenState extends ConsumerState<StyleSelectionScreen> {
             ),
             child: Row(
               children: [
-                // Color swatches
                 Row(
                   children: palette.colorList.map((color) {
                     return Container(
@@ -710,7 +702,6 @@ class _StyleSelectionScreenState extends ConsumerState<StyleSelectionScreen> {
     final paletteIndex = ref.read(selectedPaletteProvider);
     final selectedPrefs = ref.read(selectedPreferencesProvider);
 
-    // Save style name
     if (styleId != null) {
       final style = designStyles.firstWhere((s) => s.id == styleId);
       ref.read(selectedStyleNameProvider.notifier).state = style.name;
@@ -720,7 +711,6 @@ class _StyleSelectionScreenState extends ConsumerState<StyleSelectionScreen> {
       }
     }
 
-    // Convert preference IDs to human-readable text and write to aiPreferencesProvider
     final prefDescriptions = <String>[];
     for (final prefId in selectedPrefs) {
       final match = preferenceOptions.where((p) => p.id == prefId);
@@ -730,10 +720,8 @@ class _StyleSelectionScreenState extends ConsumerState<StyleSelectionScreen> {
     }
     ref.read(aiPreferencesProvider.notifier).state = prefDescriptions;
 
-    // Save room type
     ref.read(selectedRoomTypeProvider.notifier).state = _selectedRoomType;
 
-    // Update current project with room type and style if it exists
     final project = ref.read(currentProjectProvider);
     if (project != null) {
       final styleName = ref.read(selectedStyleNameProvider);

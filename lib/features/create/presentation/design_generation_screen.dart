@@ -33,8 +33,6 @@ class _DesignGenerationScreenState extends ConsumerState<DesignGenerationScreen>
       vsync: this,
       duration: const Duration(seconds: 2),
     )..repeat();
-    // _startGeneration writes providers: defer past the build phase, same
-    // reason as CreateScreen._resetWizardState.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _startGeneration();
     });
@@ -57,7 +55,6 @@ class _DesignGenerationScreenState extends ConsumerState<DesignGenerationScreen>
       final imageService = ref.read(firestoreImageServiceProvider);
       final user = authService.currentUser;
 
-      // Try to save images to Firestore (optional — works without login)
       if (project != null && user != null) {
         ref.read(generationStageProvider.notifier).state = 'Uploading images...';
         ref.read(generationProgressProvider.notifier).state = 0.1;
@@ -77,20 +74,17 @@ class _DesignGenerationScreenState extends ConsumerState<DesignGenerationScreen>
           ref.read(capturedImageIdsProvider.notifier).state =
               savedImages.map((img) => img.id).toList();
         } catch (_) {
-          // Firestore save failed — continue anyway
         }
       }
 
       ref.read(generationStageProvider.notifier).state = 'Analyzing room...';
       ref.read(generationProgressProvider.notifier).state = 0.3;
 
-      // Get public URLs for the AI - use base64 data URLs since they're stored in Firestore
       final imageUrls = capturedImages;
 
       ref.read(generationStageProvider.notifier).state = 'Generating designs...';
       ref.read(generationProgressProvider.notifier).state = 0.5;
 
-      // Call AI directly via Pollinations.ai (free, no API key)
       final aiService = ref.read(aiDesignServiceProvider);
       final styleName = ref.read(selectedStyleNameProvider);
       final palette = ref.read(selectedPaletteProvider2);
@@ -112,7 +106,6 @@ class _DesignGenerationScreenState extends ConsumerState<DesignGenerationScreen>
       final designUrls = <String>[];
       final designResults = <GeneratedDesignResult>[];
 
-      // Try to save to Firestore (optional)
       if (project != null && user != null) {
         try {
           await imageService.saveGeneratedDesign(

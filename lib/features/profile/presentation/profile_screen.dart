@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 
+import 'package:itfits/core/services/auth_service.dart';
 import 'package:itfits/core/services/providers.dart';
 import 'package:itfits/core/models/project_model.dart';
 
@@ -452,7 +453,18 @@ class _AccountCard extends ConsumerWidget {
             onPressed: () async {
               Navigator.pop(dialogContext);
               final authService = ref.read(authServiceProvider);
-              await authService.deleteAccount();
+              try {
+                await authService.deleteAccount();
+              } catch (e) {
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                    content: Text(e is RecentLoginRequiredException
+                        ? e.toString()
+                        : 'Could not delete your account. Please try again.'),
+                  ));
+                }
+                return;
+              }
               if (context.mounted) context.go('/onboarding');
             },
             style: FilledButton.styleFrom(backgroundColor: Theme.of(context).colorScheme.error),

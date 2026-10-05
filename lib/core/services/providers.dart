@@ -1,5 +1,4 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-// StateProvider lives in the legacy library since flutter_riverpod 3.x.
 import 'package:flutter_riverpod/legacy.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -9,6 +8,7 @@ import '../services/auth_service.dart';
 import '../services/project_service.dart';
 import '../services/firestore_image_service.dart';
 import '../services/ai_design_service.dart';
+import '../services/ai_proxy_service.dart';
 import '../router/app_router.dart';
 import '../models/project_model.dart';
 import '../models/floor_plan_data.dart';
@@ -43,8 +43,12 @@ final firestoreImageServiceProvider = Provider<FirestoreImageService>((ref) {
   return FirestoreImageService(ref.read(firebaseFirestoreProvider));
 });
 
+final aiProxyServiceProvider = Provider<AiProxyService>((ref) {
+  return AiProxyService();
+});
+
 final aiDesignServiceProvider = Provider<AiDesignService>((ref) {
-  return AiDesignService();
+  return AiDesignService(ref.read(aiProxyServiceProvider));
 });
 
 final currentProjectProvider = StateProvider<ProjectModel?>((ref) => null);

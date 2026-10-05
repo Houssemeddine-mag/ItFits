@@ -1,14 +1,12 @@
-import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
 import 'package:flutter_animate/flutter_animate.dart';
-import 'package:http/http.dart' as http;
 
 import 'package:itfits/core/models/floor_plan_data.dart';
+import 'package:itfits/core/services/ai_proxy_service.dart';
 import 'package:itfits/core/services/providers.dart';
-import 'package:itfits/core/config/api_config.dart';
 
 class ChatMessage {
   final String text;
@@ -90,7 +88,6 @@ class _AiChatScreenState extends ConsumerState<AiChatScreen> {
       ];
     });
 
-    // Save user messages as preferences for the generation step
     final currentPrefs = List<String>.from(ref.read(aiPreferencesProvider));
     currentPrefs.add(text);
     ref.read(aiPreferencesProvider.notifier).state = currentPrefs;
@@ -107,7 +104,7 @@ class _AiChatScreenState extends ConsumerState<AiChatScreen> {
       final styleName = ref.read(selectedStyleNameProvider);
       final roomType = ref.read(currentProjectProvider)?.roomType ?? 'Room';
       final palette = ref.read(selectedPaletteProvider2);
-      final hasKey = ApiConfig.hasApiKey;
+      final proxy = ref.read(aiProxyServiceProvider);
 
       final systemPrompt = 'You are an expert interior design agent with full access to the user\'s project. '
           'You can see their room type ($roomType), floor plan, style choice, and color palette. '
@@ -130,47 +127,22 @@ class _AiChatScreenState extends ConsumerState<AiChatScreen> {
           '- When suggesting furniture, mention approximate dimensions that fit the space\n'
           '- Consider natural light from windows and traffic from doors\n';
 
-      // Build full conversation history for the API
-      final messages = <Map<String, String>>[
+      if (!proxy.isAvailable) {
+        throw const AiProxyException('AI backend unavailable');
+      }
+
+      final messages = <Map<String, Object>>[
         {'role': 'system', 'content': systemPrompt},
       ];
-
-      if (hasKey) {
-        // Send full conversation history
-        final chatHistory = ref.read(chatMessagesProvider);
-        for (final msg in chatHistory) {
-          if (msg.isUser) {
-            messages.add({'role': 'user', 'content': msg.text});
-          } else {
-            messages.add({'role': 'assistant', 'content': msg.text});
-          }
-        }
+      final chatHistory = ref.read(chatMessagesProvider);
+      for (final msg in chatHistory.skip(max(0, chatHistory.length - 20))) {
+        messages.add({
+          'role': msg.isUser ? 'user' : 'assistant',
+          'content': msg.text,
+        });
       }
 
-      String reply;
-      if (hasKey) {
-        final response = await http.post(
-          Uri.parse('${ApiConfig.openRouterBaseUrl}/chat/completions'),
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer ${ApiConfig.openRouterApiKey}',
-          },
-          body: jsonEncode({
-            'model': ApiConfig.openRouterChatModel,
-            'messages': messages,
-            'max_tokens': 1024,
-          }),
-        );
-
-        if (response.statusCode == 200) {
-          final body = jsonDecode(utf8.decode(response.bodyBytes));
-          reply = body['choices']?[0]?['message']?['content'] ?? 'I could not generate a response.';
-        } else {
-          reply = '[API Error ${response.statusCode}] ${utf8.decode(response.bodyBytes)}';
-        }
-      } else {
-        reply = 'No API key configured. Set OPENROUTER_API_KEY to use AI chat.';
-      }
+      final reply = await proxy.chat(messages);
 
       ref.read(chatMessagesProvider.notifier).state = [
         ...ref.read(chatMessagesProvider),

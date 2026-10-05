@@ -17,6 +17,8 @@ class PanoramaViewerScreen extends ConsumerStatefulWidget {
 
 class _PanoramaViewerScreenState extends ConsumerState<PanoramaViewerScreen> {
   bool _gyroEnabled = true;
+  String? _decodedSource;
+  Uint8List? _decodedBytes;
   final double _minimumZoom = 0.5;
   final double _maximumZoom = 5.0;
 
@@ -47,13 +49,16 @@ class _PanoramaViewerScreenState extends ConsumerState<PanoramaViewerScreen> {
       );
     }
 
-    final panoramaBytes = _decodeImage(capturedImages.first);
+    if (!identical(capturedImages.first, _decodedSource)) {
+      _decodedSource = capturedImages.first;
+      _decodedBytes = _decodeImage(capturedImages.first);
+    }
+    final panoramaBytes = _decodedBytes;
 
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
         children: [
-          // Real 360° spherical panorama viewer
           if (panoramaBytes != null)
             PanoramaViewer(
               animSpeed: 0.5,
@@ -73,7 +78,6 @@ class _PanoramaViewerScreenState extends ConsumerState<PanoramaViewerScreen> {
               child: CircularProgressIndicator(color: Colors.white),
             ),
 
-          // Top bar with controls
           Positioned(
             top: 0,
             left: 0,
@@ -131,7 +135,6 @@ class _PanoramaViewerScreenState extends ConsumerState<PanoramaViewerScreen> {
             ),
           ),
 
-          // Bottom controls
           Positioned(
             bottom: 0,
             left: 0,
@@ -153,7 +156,6 @@ class _PanoramaViewerScreenState extends ConsumerState<PanoramaViewerScreen> {
                   padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
                   child: Row(
                     children: [
-                      // Gyro toggle
                       _ControlButton(
                         icon: Icons.screen_rotation_outlined,
                         label: 'Gyro',
@@ -162,7 +164,6 @@ class _PanoramaViewerScreenState extends ConsumerState<PanoramaViewerScreen> {
                       ),
                       const SizedBox(width: 12),
                       const Spacer(),
-                      // Proceed button
                       FilledButton.icon(
                         onPressed: widget.onComplete,
                         icon: const Icon(Icons.arrow_forward_rounded, size: 18),
@@ -180,7 +181,6 @@ class _PanoramaViewerScreenState extends ConsumerState<PanoramaViewerScreen> {
             ),
           ),
 
-          // Crosshair center indicator
           Center(
             child: Container(
               width: 20,

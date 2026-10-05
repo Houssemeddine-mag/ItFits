@@ -1,13 +1,8 @@
 class ApiConfig {
   ApiConfig._();
 
-  static const String openRouterApiKey = String.fromEnvironment(
-    'OPENROUTER_API_KEY',
-    defaultValue: '',
+  static const String functionsBaseUrl = String.fromEnvironment(
+    'FUNCTIONS_BASE_URL',
+    defaultValue: 'https://us-central1-itfits-ai.cloudfunctions.net',
   );
-  static const String openRouterBaseUrl = 'https://openrouter.ai/api/v1';
-  static const String openRouterFreeModel = 'openrouter/free';
-  static const String openRouterChatModel = 'openrouter/free';
-
-  static bool get hasApiKey => openRouterApiKey.isNotEmpty;
 }

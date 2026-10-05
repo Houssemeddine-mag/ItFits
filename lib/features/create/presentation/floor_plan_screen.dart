@@ -3,11 +3,10 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:http/http.dart' as http;
+import 'package:itfits/core/services/ai_proxy_service.dart';
 
 import 'package:itfits/core/models/floor_plan_data.dart';
 import 'package:itfits/core/services/providers.dart';
-import 'package:itfits/core/config/api_config.dart';
 
 class FloorPlanScreen extends ConsumerStatefulWidget {
   final VoidCallback onComplete;
@@ -27,25 +26,20 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
   _Mode _mode = _Mode.none;
   bool _isAnalyzing = false;
 
-  // Selection
   int? _selectedWall;
   String _selectedType = '';
   int? _selectedIdx;
 
-  // Drag state — ONE gesture handles everything
   _DragTarget _dragTarget = _DragTarget.none;
   int _dragCornerWall = -1;
   bool _dragCornerIsStart = true;
   String _dragElementType = '';
   int _dragElementIdx = -1;
 
-  // Add wall state: first tap splits a wall and sets corner1, second tap splits another wall and creates the wall
   Offset? _addWallCorner1;
 
-  // Original plan for reset
   FloorPlanData? _originalPlan;
 
-  // Cached layout values
   Offset _origin = Offset.zero;
   double _ppm = 80;
 
@@ -68,11 +62,9 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
 
   void _save() => ref.read(floorPlanDataProvider.notifier).state = _plan;
 
-  // ─── Coordinate conversion ───
   Offset _worldToScreen(Offset w) => _origin + w * _ppm;
   Offset _screenToWorld(Offset s) => (s - _origin) / _ppm;
 
-  // ─── Geometry helpers ───
   bool _samePoint(Offset a, Offset b) =>
       (a - b).distance < 0.001;
 
@@ -84,10 +76,7 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
     return (p - a + ab * (-t.clamp(0.0, 1.0))).distance;
   }
 
-  // ─── Hit testing (checks in priority order) ───
-  // Returns: 'corner', 'element', 'wall', or null
   String? _hitTest(Offset screenPos) {
-    // 1. Corners (within 20 screen pixels)
     double bestCornerDist = 20;
     int bestCornerWall = -1;
     bool bestCornerIsStart = true;
@@ -109,7 +98,6 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
       return 'corner';
     }
 
-    // 2. Elements (within 30 screen pixels)
     for (int i = 0; i < _plan.doors.length; i++) {
       final d = _plan.doors[i];
       if (d.wallIndex < _plan.walls.length) {
@@ -144,7 +132,6 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
       }
     }
 
-    // 3. Walls (within 20 screen pixels of wall line)
     int bestWall = -1;
     double bestWallDist = 20;
     for (int i = 0; i < _plan.walls.length; i++) {
@@ -163,7 +150,6 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
     return null;
   }
 
-  // ─── Gesture handlers (single GestureDetector) ───
   void _onTapUp(TapUpDetails details) {
     final hit = _hitTest(details.localPosition);
 
@@ -196,7 +182,6 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
       return;
     }
 
-    // Normal mode: select wall for property panel / delete
     setState(() {
       _selectedType = '';
       _selectedIdx = null;
@@ -205,7 +190,6 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
         _selectedType = _dragElementType;
         _selectedIdx = _dragElementIdx;
       } else if (hit == 'wall') {
-        // _selectedWall already set by _hitTest
       } else {
         _selectedWall = null;
       }
@@ -245,9 +229,7 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
     });
 
     if (wasCornerDrag && cornerPos != null) {
-      // Check if corner landed on a wall (but not at an existing corner) → merge
       _tryMergeCornerOntoWall(cornerPos);
-      // Check if corner is isolated on a split point → unmerge
       _tryUnmergeAtPoint(cornerPos);
     }
 
@@ -255,17 +237,13 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
   }
 
   void _tryMergeCornerOntoWall(Offset cornerPos) {
-    // Find a wall near this corner (but not the walls that already end at this corner)
     for (int i = 0; i < _plan.walls.length; i++) {
       final w = _plan.walls[i];
-      // Skip walls that already have this corner as an endpoint
       if (_samePoint(w.start, cornerPos) || _samePoint(w.end, cornerPos)) continue;
       final dist = _pointToSegDist(cornerPos, w.start, w.end);
       if (dist < 0.1) {
-        // Corner is on this wall → split it
         final t = _positionAlongWall(cornerPos, w);
         final snapPt = w.getPointAtPosition(t);
-        // Move all corners at the old position to the snap point
         _moveCornerTo(cornerPos, snapPt);
         _splitWallAtIndex(i, t);
         _mergeNearbyCorners();
@@ -287,7 +265,6 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
   }
 
   void _tryUnmergeAtPoint(Offset point) {
-    // If exactly 2 collinear walls meet at this point and neither has elements on it, merge them
     final matching = <int>[];
     for (int i = 0; i < _plan.walls.length; i++) {
       final w = _plan.walls[i];
@@ -300,7 +277,6 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
     final a = _plan.walls[matching[0]];
     final b = _plan.walls[matching[1]];
 
-    // Check collinear
     final dirA = a.end - a.start;
     final dirB = b.end - b.start;
     final lenA = dirA.distance;
@@ -311,13 +287,11 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
     final cross = (normA.dx * normB.dy - normA.dy * normB.dx).abs();
     if (cross > 0.05) return;
 
-    // Check no elements are on either half
     final hasElements = _plan.doors.any((d) => d.wallIndex == matching[0] || d.wallIndex == matching[1])
         || _plan.windows.any((w) => w.wallIndex == matching[0] || w.wallIndex == matching[1])
         || _plan.outlets.any((o) => o.wallIndex == matching[0] || o.wallIndex == matching[1]);
     if (hasElements) return;
 
-    // Merge
     Offset mergedStart = _samePoint(a.start, point) ? a.end : a.start;
     Offset mergedEnd = _samePoint(b.start, point) ? b.end : b.start;
     final merged = WallSegment(start: mergedStart, end: mergedEnd, isExternal: a.isExternal);
@@ -334,7 +308,6 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
     _save();
   }
 
-  // ─── Corner dragging (free — any position) ───
   void _moveCorner(Offset newWorldPos) {
     final wallIdx = _dragCornerWall;
     final wall = _plan.walls[wallIdx];
@@ -342,7 +315,6 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
 
     final oldCorner = isStart ? wall.start : wall.end;
 
-    // Find all walls sharing this corner and move them together
     for (int i = 0; i < _plan.walls.length; i++) {
       final w = _plan.walls[i];
       if (_samePoint(w.start, oldCorner)) {
@@ -373,7 +345,6 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
     _plan.roomDepth = max(0.5, maxY - minY);
   }
 
-  // ─── Element dragging along wall ───
   void _dragElement(Offset screenPos) {
     final world = _screenToWorld(screenPos);
 
@@ -430,7 +401,6 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
     return t.clamp(0.05, 0.95);
   }
 
-  // ─── Place element on wall ───
   void _placeElement(String type, int wallIdx) {
     HapticFeedback.mediumImpact();
     setState(() {
@@ -463,7 +433,6 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
     );
   }
 
-  // ─── Split wall (add corner) ───
   void _splitWall(int wallIdx) {
     HapticFeedback.mediumImpact();
     final wall = _plan.walls[wallIdx];
@@ -513,12 +482,10 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
     }
   }
 
-  // ─── Add wall (two-tap: split wall → split wall → connect) ───
   void _handleAddWallTap(Offset screenPos) {
     final world = _screenToWorld(screenPos);
 
     if (_addWallCorner1 == null) {
-      // First tap — must hit a wall, split it, record the new corner
       final wallIdx = _findWallAtPoint(screenPos);
       if (wallIdx == null) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
@@ -536,13 +503,10 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
         duration: const Duration(seconds: 2),
       ));
     } else {
-      // Second tap — must hit a wall, split it (same as first tap)
       final wallIdx = _findWallAtPoint(screenPos);
       if (wallIdx == null) {
-        // No wall hit — check if near an existing corner
         final snapped = _snapToCorner(world);
         if ((snapped - world).distance * _ppm < 25) {
-          // Near a corner — use it directly
           if ((_addWallCorner1! - snapped).distance < 0.05) {
             setState(() => _addWallCorner1 = null);
             ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
@@ -565,7 +529,6 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
         return;
       }
 
-      // Hit a wall — split it, same as first tap
       final t = _positionAlongWall(world, _plan.walls[wallIdx]);
       final corner2 = _plan.walls[wallIdx].getPointAtPosition(t);
 
@@ -638,7 +601,7 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
   }
 
   Offset _snapToCorner(Offset world) {
-    const snapDist = 0.15; // snap within 15cm in world units
+    const snapDist = 0.15;
     for (final wall in _plan.walls) {
       for (final pt in [wall.start, wall.end]) {
         if ((world - pt).distance < snapDist) return pt;
@@ -657,7 +620,6 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
           for (final (otherStart, _) in [(true, j), (false, j)]) {
             final other = otherStart ? _plan.walls[j].start : _plan.walls[j].end;
             if ((pt - other).distance < threshold && (pt - other).distance > 0.001) {
-              // Snap j's corner to i's corner (use the first one as canonical)
               _plan.walls[j] = otherStart
                   ? _plan.walls[j].copyWith(start: pt)
                   : _plan.walls[j].copyWith(end: pt);
@@ -681,7 +643,6 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
       _plan.outlets.removeWhere((o) => o.wallIndex == wallIdx);
       _reindexAfterDelete(wallIdx);
 
-      // Try to merge split halves at each endpoint of the deleted wall
       _tryMergeAtPoint(ep1);
       _tryMergeAtPoint(ep2);
 
@@ -730,7 +691,6 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
   }
 
   void _tryMergeAtPoint(Offset point) {
-    // Find all walls that have this point as an endpoint
     final matching = <int>[];
     for (int i = 0; i < _plan.walls.length; i++) {
       final w = _plan.walls[i];
@@ -739,12 +699,10 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
       }
     }
 
-    // If exactly 2 walls meet at this point, they might be split halves — merge them
     if (matching.length == 2) {
       final a = _plan.walls[matching[0]];
       final b = _plan.walls[matching[1]];
 
-      // Check they are collinear (same direction)
       final dirA = (a.end - a.start);
       final dirB = (b.end - b.start);
       final lenA = dirA.distance;
@@ -754,9 +712,8 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
       final normA = Offset(dirA.dx / lenA, dirA.dy / lenA);
       final normB = Offset(dirB.dx / lenB, dirB.dy / lenB);
       final cross = (normA.dx * normB.dy - normA.dy * normB.dx).abs();
-      if (cross > 0.05) return; // not collinear
+      if (cross > 0.05) return;
 
-      // Determine the merged wall: one end from A, one end from B, not the shared point
       Offset mergedStart;
       Offset mergedEnd;
       if (_samePoint(a.start, point)) {
@@ -770,18 +727,15 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
         mergedEnd = b.start;
       }
 
-      // Replace the two halves with one merged wall (keep isExternal from the first)
       final merged = WallSegment(start: mergedStart, end: mergedEnd, isExternal: a.isExternal);
       final idxA = matching[0];
       final idxB = matching[1];
-      // Remove higher index first to keep lower indices valid
       final hi = idxA > idxB ? idxA : idxB;
       final lo = idxA > idxB ? idxB : idxA;
       _plan.walls.removeAt(hi);
       _plan.walls.removeAt(lo);
       _plan.walls.insert(lo, merged);
 
-      // Reindex elements that referenced the removed walls
       _reindexAfterDelete(hi);
       _reindexAfterDelete(lo);
     }
@@ -820,7 +774,6 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
     );
   }
 
-  // ─── Delete element ───
   void _deleteElement(String type, int idx) {
     setState(() {
       switch (type) {
@@ -834,7 +787,6 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
     _save();
   }
 
-  // ─── Update element properties ───
   void _updateDoor(int idx, {double? pos, double? width, double? height, DoorSwing? swing, int? wall}) {
     final d = _plan.doors[idx];
     setState(() {
@@ -887,15 +839,15 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
     return 'Wall ${i + 1}';
   }
 
-  // ─── Auto-detect ───
   Future<void> _autoDetect() async {
     final images = ref.read(capturedImagesProvider);
     if (images.isEmpty) return;
-    if (!ApiConfig.hasApiKey) {
+    final proxy = ref.read(aiProxyServiceProvider);
+    if (!proxy.isAvailable) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Set OPENROUTER_API_KEY to use AI auto-detect'),
+            content: Text('Sign in to use AI auto-detect'),
             backgroundColor: Colors.orange,
           ),
         );
@@ -906,44 +858,25 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
     try {
       final imageData = images.first;
       final dataUrl = imageData.startsWith('data:') ? imageData : 'data:image/jpeg;base64,$imageData';
-      final response = await http.post(
-        Uri.parse('${ApiConfig.openRouterBaseUrl}/chat/completions'),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ${ApiConfig.openRouterApiKey}',
+      final content = await proxy.chat([
+        {
+          'role': 'user',
+          'content': [
+            {'type': 'text', 'text': _detectionPrompt()},
+            {'type': 'image_url', 'image_url': {'url': dataUrl}},
+          ],
         },
-        body: jsonEncode({
-          'model': ApiConfig.openRouterFreeModel,
-          'messages': [{
-            'role': 'user',
-            'content': [
-              {'type': 'text', 'text': _detectionPrompt()},
-              {'type': 'image_url', 'image_url': {'url': dataUrl}},
-            ],
-          }],
-        }),
-      );
-      if (response.statusCode == 200) {
-        final body = jsonDecode(utf8.decode(response.bodyBytes));
-        final content = body['choices']?[0]?['message']?['content'] ?? '';
-        _parseDetection(content);
-      } else {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text('Auto-detect failed: ${response.statusCode} ${utf8.decode(response.bodyBytes)}'),
-            backgroundColor: Colors.red.shade700,
-          ));
-        }
-      }
-    } catch (e) {
+      ]);
+      _parseDetection(content);
+    } on AiProxyException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('Auto-detect error: $e'),
+          content: Text('Auto-detect failed: ${e.message}'),
           backgroundColor: Colors.red.shade700,
         ));
       }
     }
-    setState(() => _isAnalyzing = false);
+    if (mounted) setState(() => _isAnalyzing = false);
   }
 
   String _detectionPrompt() => 'Analyze this room photo and extract the floor plan as JSON. '
@@ -1088,9 +1021,6 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
     );
   }
 
-  // ═══════════════════════════════════════════════════
-  // BUILD
-  // ═══════════════════════════════════════════════════
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
@@ -1109,7 +1039,6 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            // ── Header ──
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 6, 12, 4),
               child: Row(
@@ -1155,7 +1084,6 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
               ),
             ),
 
-            // ── Mode chips ──
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
               child: Row(
@@ -1178,7 +1106,6 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
               ),
             ),
 
-            // ── Canvas ──
             Expanded(
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 8),
@@ -1221,11 +1148,9 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
               ),
             ),
 
-            // ── Property panel ──
             if (_selectedIdx != null) _buildPropertyPanel(cs),
             if (_selectedWall != null && _selectedIdx == null) _buildWallPanel(cs),
 
-            // ── Bottom bar ──
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 6, 12, 10),
               child: Row(
@@ -1459,9 +1384,6 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
   }
 }
 
-// ═══════════════════════════════════════════════════
-// PAINTER — all rendering in one CustomPainter
-// ═══════════════════════════════════════════════════
 class _FloorPlanPainter extends CustomPainter {
   final FloorPlanData plan;
   final Offset origin;
@@ -1489,10 +1411,8 @@ class _FloorPlanPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    // Grid
     _drawGrid(canvas, size);
 
-    // Floor fill
     if (plan.walls.isNotEmpty) {
       final path = Path();
       path.addPolygon(plan.walls.map((w) => w2s(w.start)).toList(), true);
@@ -1500,7 +1420,6 @@ class _FloorPlanPainter extends CustomPainter {
       canvas.drawPath(path, floorPaint);
     }
 
-    // Walls
     for (int i = 0; i < plan.walls.length; i++) {
       final wall = plan.walls[i];
       final s = w2s(wall.start);
@@ -1537,7 +1456,6 @@ class _FloorPlanPainter extends CustomPainter {
         ..strokeCap = StrokeCap.round;
       canvas.drawLine(s, e, paint);
 
-      // Wall label
       final mid = (s + e) / 2;
       final wallLen = (wall.end - wall.start).distance;
       final tp = TextPainter(text: TextSpan(
@@ -1547,7 +1465,6 @@ class _FloorPlanPainter extends CustomPainter {
       tp.paint(canvas, Offset(mid.dx - tp.width / 2, mid.dy - 14));
     }
 
-    // Dimension labels
     if (plan.walls.isNotEmpty) {
       final rpW = plan.roomWidth * ppm;
       final rpH = plan.roomDepth * ppm;
@@ -1568,7 +1485,6 @@ class _FloorPlanPainter extends CustomPainter {
       canvas.restore();
     }
 
-    // Doors — standard architectural: quarter-circle arc + leaf line
     for (int i = 0; i < plan.doors.length; i++) {
       final d = plan.doors[i];
       if (d.wallIndex >= plan.walls.length) continue;
@@ -1579,7 +1495,6 @@ class _FloorPlanPainter extends CustomPainter {
       if (isSel) _drawRuler(canvas, pos, d.positionAlongWall, wall);
     }
 
-    // Windows — standard architectural: parallel lines across wall
     for (int i = 0; i < plan.windows.length; i++) {
       final w = plan.windows[i];
       if (w.wallIndex >= plan.walls.length) continue;
@@ -1590,7 +1505,6 @@ class _FloorPlanPainter extends CustomPainter {
       if (isSel) _drawRuler(canvas, pos, w.positionAlongWall, wall);
     }
 
-    // Outlets — standard electrical: semicircle symbol
     for (int i = 0; i < plan.outlets.length; i++) {
       final o = plan.outlets[i];
       if (o.wallIndex >= plan.walls.length) continue;
@@ -1601,7 +1515,6 @@ class _FloorPlanPainter extends CustomPainter {
       if (isSel) _drawRuler(canvas, pos, o.positionAlongWall, wall);
     }
 
-    // Add wall preview marker
     if (addWallStart != null && mode == _Mode.addWall) {
       final sp = w2s(addWallStart!);
       canvas.drawCircle(sp, 8, Paint()..color = Colors.green.shade400.withValues(alpha: 0.3));
@@ -1613,7 +1526,6 @@ class _FloorPlanPainter extends CustomPainter {
       hint.paint(canvas, Offset(sp.dx - hint.width / 2, sp.dy + 14));
     }
 
-    // Corner handles — small dots
     final seen = <String>{};
     for (final wall in plan.walls) {
       for (final pt in [wall.start, wall.end]) {
@@ -1635,7 +1547,6 @@ class _FloorPlanPainter extends CustomPainter {
     canvas.translate(pos.dx, pos.dy);
     canvas.rotate(wallAngle);
 
-    // Door leaf line (the actual door panel)
     final leafPaint = Paint()
       ..color = color
       ..strokeWidth = 2.5
@@ -1645,14 +1556,11 @@ class _FloorPlanPainter extends CustomPainter {
     final sign = isRight ? 1.0 : -1.0;
 
     if (door.swing == DoorSwing.sliding) {
-      // Sliding door: two parallel offset lines
       canvas.drawLine(Offset(-doorWidthPx / 2, -2), Offset(doorWidthPx / 2, -2), leafPaint);
       canvas.drawLine(Offset(-doorWidthPx / 2 + 4, 2), Offset(doorWidthPx / 2 + 4, 2), leafPaint..strokeWidth = 1.5);
     } else if (door.swing == DoorSwing.double) {
-      // Double door: two leaf lines meeting in middle
       canvas.drawLine(Offset(-doorWidthPx / 2, 0), Offset(0, 0), leafPaint);
       canvas.drawLine(Offset(doorWidthPx / 2, 0), Offset(0, 0), leafPaint);
-      // Two arcs
       final arcPaint = Paint()
         ..color = color.withValues(alpha: 0.35)
         ..style = PaintingStyle.stroke
@@ -1663,10 +1571,8 @@ class _FloorPlanPainter extends CustomPainter {
       final rect2 = Rect.fromCircle(center: Offset(doorWidthPx / 4, 0), radius: r / 2);
       canvas.drawArc(rect2, -pi / 2, pi / 2, false, arcPaint);
     } else {
-      // Single swing door: leaf line + quarter-circle arc
       canvas.drawLine(Offset.zero, Offset(sign * doorWidthPx, 0), leafPaint);
 
-      // Quarter-circle arc (swing path)
       final arcPaint = Paint()
         ..color = color.withValues(alpha: 0.35)
         ..style = PaintingStyle.stroke
@@ -1679,7 +1585,6 @@ class _FloorPlanPainter extends CustomPainter {
 
     canvas.restore();
 
-    // Selection highlight
     if (selected) {
       canvas.drawCircle(pos, doorWidthPx / 2 + 6, Paint()
         ..color = Colors.red.withValues(alpha: 0.15)
@@ -1701,18 +1606,15 @@ class _FloorPlanPainter extends CustomPainter {
       ..color = color
       ..strokeWidth = 2;
 
-    // Standard architectural window: two parallel lines (glass panes) with end caps
     canvas.drawLine(Offset(-halfW, -3), Offset(halfW, -3), linePaint);
     canvas.drawLine(Offset(-halfW, 3), Offset(halfW, 3), linePaint);
 
-    // End caps (wall edge)
     final capPaint = Paint()
       ..color = color
       ..strokeWidth = 1.5;
     canvas.drawLine(Offset(-halfW, -3), Offset(-halfW, 3), capPaint);
     canvas.drawLine(Offset(halfW, -3), Offset(halfW, 3), capPaint);
 
-    // Center line (glass divider for wider windows)
     if (winWidthPx > 30) {
       final centerPaint = Paint()
         ..color = color.withValues(alpha: 0.4)
@@ -1722,7 +1624,6 @@ class _FloorPlanPainter extends CustomPainter {
 
     canvas.restore();
 
-    // Selection highlight
     if (selected) {
       canvas.drawCircle(pos, winWidthPx / 2 + 6, Paint()
         ..color = Colors.blue.withValues(alpha: 0.15)
@@ -1739,7 +1640,6 @@ class _FloorPlanPainter extends CustomPainter {
     canvas.translate(pos.dx, pos.dy);
     canvas.rotate(wallAngle);
 
-    // Standard electrical outlet: semicircle (half-circle) + flat line
     final arcPaint = Paint()
       ..color = color
       ..style = PaintingStyle.stroke
@@ -1747,13 +1647,11 @@ class _FloorPlanPainter extends CustomPainter {
     final rect = Rect.fromCircle(center: Offset(0, 0), radius: r);
     canvas.drawArc(rect, -pi, pi, false, arcPaint);
 
-    // Flat line (wall surface)
     final linePaint = Paint()
       ..color = color
       ..strokeWidth = 2;
     canvas.drawLine(Offset(-r, 0), Offset(r, 0), linePaint);
 
-    // Two small prongs (for power outlet)
     if (outlet.type == OutletType.power) {
       final prongPaint = Paint()
         ..color = color
@@ -1761,13 +1659,11 @@ class _FloorPlanPainter extends CustomPainter {
       canvas.drawLine(Offset(-3, 0), Offset(-3, -r - 2), prongPaint);
       canvas.drawLine(Offset(3, 0), Offset(3, -r - 2), prongPaint);
     } else {
-      // Data/coax/etc: small dot in center
       canvas.drawCircle(Offset(0, -r / 2), 2, Paint()..color = color);
     }
 
     canvas.restore();
 
-    // Selection highlight
     if (selected) {
       canvas.drawCircle(pos, r + 6, Paint()
         ..color = Colors.orange.withValues(alpha: 0.15)
@@ -1781,7 +1677,7 @@ class _FloorPlanPainter extends CustomPainter {
     final distToEnd = (1.0 - positionAlongWall) * wallLen;
     final wallAngle = (wall.end - wall.start).direction;
     final normal = wall.normal;
-    final offset = normal * 18; // offset ruler lines perpendicular to wall
+    final offset = normal * 18;
 
     final linePaint = Paint()
       ..color = cs.primary.withValues(alpha: 0.5)
@@ -1793,14 +1689,11 @@ class _FloorPlanPainter extends CustomPainter {
     final startScreen = w2s(wall.start);
     final endScreen = w2s(wall.end);
 
-    // Ruler line from element to wall start
     final rStart1 = elementPos + offset;
     final rEnd1 = startScreen + offset;
     canvas.drawLine(rStart1, rEnd1, linePaint);
-    // Tick marks
     canvas.drawCircle(rStart1, 2, dotPaint);
     canvas.drawCircle(rEnd1, 2, dotPaint);
-    // Distance label
     final label1 = TextPainter(
       text: TextSpan(
         text: '${distToStart.toStringAsFixed(1)}m',
@@ -1809,20 +1702,17 @@ class _FloorPlanPainter extends CustomPainter {
       textDirection: TextDirection.ltr,
     )..layout();
     final mid1 = (rStart1 + rEnd1) / 2;
-    // Position label along the ruler, rotated to match wall angle
     canvas.save();
     canvas.translate(mid1.dx, mid1.dy);
     canvas.rotate(wallAngle);
     label1.paint(canvas, Offset(-label1.width / 2, -label1.height - 2));
     canvas.restore();
 
-    // Ruler line from element to wall end
     final rStart2 = elementPos - offset;
     final rEnd2 = endScreen - offset;
     canvas.drawLine(rStart2, rEnd2, linePaint);
     canvas.drawCircle(rStart2, 2, dotPaint);
     canvas.drawCircle(rEnd2, 2, dotPaint);
-    // Distance label
     final label2 = TextPainter(
       text: TextSpan(
         text: '${distToEnd.toStringAsFixed(1)}m',

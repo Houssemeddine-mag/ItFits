@@ -9,213 +9,292 @@ import 'package:image/image.dart' as img;
 
 import 'sphere_math.dart';
 
-/// One captured frame with the device pose at shutter time.
-///
-/// JPEGs live on disk (28 full-res frames must not pile up in RAM);
-/// the isolate reads them by path.
 class SphereShot {
   final String filePath;
   final List<double> quatRelative;
 
-  const SphereShot({required this.filePath, required this.quatRelative});
+  final double? focal35mm;
+
+  const SphereShot({
+    required this.filePath,
+    required this.quatRelative,
+    this.focal35mm,
+  });
 }
 
 class StitchResult {
-  /// Equirectangular JPEG with GPano XMP metadata.
   final Uint8List jpegBytes;
 
-  /// Fraction of canvas pixels covered by at least one frame.
   final double coverage;
 
   const StitchResult({required this.jpegBytes, required this.coverage});
 }
 
-/// Offline spherical stitcher (§4–§5 and §7 of the guide, adapted).
-///
-/// Rotation-only model: every frame is warped onto the equirectangular
-/// canvas with the IMU pose homography `H = K·R·K⁻¹` (§3) and blended with
-/// edge feathering. The heavy loop runs in an isolate; full-res frames are
-/// downscaled to working resolution first (§1.2, memory discipline).
-Future<StitchResult> stitchSphereOffline({
-  required List<SphereShot> shots,
-  double hfovDeg = 70,
-  int canvasWidth = 2048,
-}) {
-  return Isolate.run(() => _stitch(shots
-      .map((s) => {
-            'path': s.filePath,
-            'quat': s.quatRelative,
-          })
-      .toList(), hfovDeg, canvasWidth));
+double? readFocal35mm(Uint8List jpeg) {
+  try {
+    final exif = img.decodeJpgExif(jpeg);
+    final f = exif?.exifIfd['FocalLengthIn35mmFilm']?.toInt();
+    if (f == null || f < 8 || f > 200) return null;
+    return f.toDouble();
+  } catch (_) {
+    return null;
+  }
 }
 
-StitchResult _stitch(
-    List<Map<String, Object>> shots, double hfovDeg, int canvasWidth) {
+Future<StitchResult> stitchSphereOffline({
+  required List<SphereShot> shots,
+  int canvasWidth = 2560,
+}) {
+  final jobs = shots
+      .map((s) => _Job(s.filePath, s.quatRelative, s.focal35mm))
+      .toList();
+  return Isolate.run(() => _stitch(jobs, canvasWidth));
+}
+
+class _Job {
+  final String path;
+  final List<double> quat;
+  final double? focal35;
+  const _Job(this.path, this.quat, this.focal35);
+}
+
+const int _workingLongEdge = 1280;
+
+StitchResult _stitch(List<_Job> jobs, int canvasWidth) {
   final canvasHeight = canvasWidth ~/ 2;
   final pixels = canvasWidth * canvasHeight;
-  final accR = Float32List(pixels);
-  final accG = Float32List(pixels);
-  final accB = Float32List(pixels);
-  final accW = Float32List(pixels);
+  final acc = Float32List(pixels * 4);
 
-  const d2r = math.pi / 180.0;
-  final tanH = math.tan(hfovDeg * d2r / 2);
+  final cosP = Float64List(canvasHeight), sinP = Float64List(canvasHeight);
+  for (var v = 0; v < canvasHeight; v++) {
+    final pitch = math.pi / 2 - ((v + 0.5) / canvasHeight) * math.pi;
+    cosP[v] = math.cos(pitch);
+    sinP[v] = math.sin(pitch);
+  }
+  final cosY = Float64List(canvasWidth), sinY = Float64List(canvasWidth);
+  for (var u = 0; u < canvasWidth; u++) {
+    final yaw = ((u + 0.5) / canvasWidth) * 2 * math.pi - math.pi;
+    cosY[u] = math.cos(yaw);
+    sinY[u] = math.sin(yaw);
+  }
 
-  for (final shot in shots) {
-    final raw = File(shot['path']! as String).readAsBytesSync();
-    final decoded = img.decodeImage(raw);
+  for (final job in jobs) {
+    final raw = File(job.path).readAsBytesSync();
+    var decoded = img.decodeImage(raw);
     if (decoded == null) continue;
-    // Working resolution: bound time & RAM (§1.2).
-    final scale = 1024 / math.max(decoded.width, decoded.height);
-    final frame = scale < 1
-        ? img.copyResize(decoded,
-            width: (decoded.width * scale).round(),
-            height: (decoded.height * scale).round(),
-            interpolation: img.Interpolation.linear)
-        : decoded;
+    decoded = img.bakeOrientation(decoded);
+    final scale = _workingLongEdge / math.max(decoded.width, decoded.height);
+    final frame = (scale < 1
+            ? img.copyResize(decoded,
+                width: (decoded.width * scale).round(),
+                height: (decoded.height * scale).round(),
+                interpolation: img.Interpolation.average)
+            : decoded)
+        .convert(format: img.Format.uint8, numChannels: 3);
     final fw = frame.width;
     final fh = frame.height;
-    final tanV = tanH * fh / fw;
+    final rgb = frame.getBytes(order: img.ChannelOrder.rgb);
 
-    final q = Quat.fromList((shot['quat']! as List).cast<double>());
-    final qInv = q.conjugated;
+    final long = math.max(fw, fh).toDouble();
+    final tanLong = job.focal35 != null
+        ? CameraFov.from35mm(job.focal35!, 1).tanHalfHeight
+        : CameraFov.typical.tanHalfHeight;
+    final tanX = tanLong * fw / long;
+    final tanY = tanLong * fh / long;
 
-    final bounds = _photoBounds(q, tanH, tanV, canvasWidth, canvasHeight);
+    final q = Quat.fromList(job.quat.cast<double>());
+    final m = _matrixOf(q.conjugated);
 
-    for (var v = bounds.top; v <= bounds.bottom; v++) {
-      final pitch = math.pi / 2 - (v / canvasHeight) * math.pi;
-      final cosP = math.cos(pitch);
-      final sinP = math.sin(pitch);
-      for (var u = bounds.left; u <= bounds.right; u++) {
-        final uu = u % canvasWidth;
-        final yaw = (uu / canvasWidth) * 2 * math.pi - math.pi;
-        final dir = [
-          cosP * math.sin(yaw),
-          sinP,
-          -cosP * math.cos(yaw),
-        ];
-        // Feather weight by normalized image radius (1 = soft edge).
-        final cam = qInv.rotate(dir);
-        final depth = -cam[2];
-        if (depth <= 1e-6) continue;
-        final xn = cam[0] / depth;
-        final yn = cam[1] / depth;
-        final rx = xn / tanH;
-        final ry = yn / tanV;
-        if (rx < -1 || rx > 1 || ry < -1 || ry > 1) continue;
-        final rn = math.sqrt(rx * rx + ry * ry);
-        final w = math.pow((1.12 - rn).clamp(0.0, 1.0), 1.5).toDouble();
-        if (w <= 0) continue;
+    final span = _frameSpan(q, tanX, tanY, canvasWidth, canvasHeight);
+
+    for (var v = span.top; v <= span.bottom; v++) {
+      final cp = cosP[v], sp = sinP[v];
+      final row = v * canvasWidth;
+      for (var k = 0; k < span.width; k++) {
+        final u = (span.left + k) % canvasWidth;
+        final dx = cp * sinY[u], dy = sp, dz = -cp * cosY[u];
+        final cz = m[6] * dx + m[7] * dy + m[8] * dz;
+        if (cz >= -1e-6) continue;
+        final depth = -cz;
+        final rx = (m[0] * dx + m[1] * dy + m[2] * dz) / depth / tanX;
+        if (rx < -1 || rx > 1) continue;
+        final ry = (m[3] * dx + m[4] * dy + m[5] * dz) / depth / tanY;
+        if (ry < -1 || ry > 1) continue;
+
+        final f = (1 - rx.abs()) * (1 - ry.abs());
+        final w = f * f + 1e-6;
 
         final sx = (rx * 0.5 + 0.5) * (fw - 1);
-        final sy = (ry * 0.5 + 0.5) * (fh - 1);
-        final px = _bilinear(frame, sx, sy);
+        final sy = (0.5 - ry * 0.5) * (fh - 1);
+        final x0 = sx.floor(), y0 = sy.floor();
+        final x1 = x0 + 1 < fw ? x0 + 1 : x0;
+        final y1 = y0 + 1 < fh ? y0 + 1 : y0;
+        final ax = sx - x0, ay = sy - y0;
+        final i00 = (y0 * fw + x0) * 3, i10 = (y0 * fw + x1) * 3;
+        final i01 = (y1 * fw + x0) * 3, i11 = (y1 * fw + x1) * 3;
+        final w00 = (1 - ax) * (1 - ay), w10 = ax * (1 - ay);
+        final w01 = (1 - ax) * ay, w11 = ax * ay;
 
-        final idx = v * canvasWidth + uu;
-        accR[idx] += px[0] * w;
-        accG[idx] += px[1] * w;
-        accB[idx] += px[2] * w;
-        accW[idx] += w;
+        final o = (row + u) * 4;
+        for (var c = 0; c < 3; c++) {
+          acc[o + c] += w *
+              (rgb[i00 + c] * w00 +
+                  rgb[i10 + c] * w10 +
+                  rgb[i01 + c] * w01 +
+                  rgb[i11 + c] * w11);
+        }
+        acc[o + 3] += w;
       }
     }
   }
 
-  final out = img.Image(width: canvasWidth, height: canvasHeight);
-  var covered = 0;
+  final out = Uint8List(pixels * 3);
+  final covered = Uint8List(pixels);
+  var coveredCount = 0;
   for (var i = 0; i < pixels; i++) {
-    final w = accW[i];
-    if (w > 1e-6) {
-      covered++;
-      out.setPixelRgba(
-        i % canvasWidth,
-        i ~/ canvasWidth,
-        (accR[i] / w).round().clamp(0, 255),
-        (accG[i] / w).round().clamp(0, 255),
-        (accB[i] / w).round().clamp(0, 255),
-        255,
-      );
+    final w = acc[i * 4 + 3];
+    if (w <= 0) continue;
+    covered[i] = 1;
+    coveredCount++;
+    for (var c = 0; c < 3; c++) {
+      out[i * 3 + c] = (acc[i * 4 + c] / w).round().clamp(0, 255);
     }
   }
 
-  final jpg = Uint8List.fromList(img.encodeJpg(out, quality: 90));
+  fillHoles(out, covered, canvasWidth, canvasHeight);
+
+  final image = img.Image.fromBytes(
+    width: canvasWidth,
+    height: canvasHeight,
+    bytes: out.buffer,
+    numChannels: 3,
+    order: img.ChannelOrder.rgb,
+  );
+  final jpg = Uint8List.fromList(img.encodeJpg(image, quality: 90));
   final tagged = injectGpanoXmp(jpg, canvasWidth, canvasHeight);
-  return StitchResult(
-    jpegBytes: tagged,
-    coverage: covered / pixels,
-  );
+  return StitchResult(jpegBytes: tagged, coverage: coveredCount / pixels);
 }
 
-class _Bounds {
-  final int left, right, top, bottom;
-  const _Bounds(this.left, this.right, this.top, this.bottom);
-}
-
-/// Canvas span covered by one frame (corners through pose homography).
-_Bounds _photoBounds(
-    Quat q, double tanH, double tanV, int canvasW, int canvasH) {
-  var minU = canvasW.toDouble();
-  var maxU = -1.0;
-  var minV = canvasH.toDouble();
-  var maxV = -1.0;
-  for (final c in [
-    [-1.0, -1.0],
-    [1.0, -1.0],
-    [-1.0, 1.0],
-    [1.0, 1.0],
-  ]) {
-    final dir = q.rotate([c[0] * tanH, c[1] * tanV, -1.0]);
-    final len =
-        math.sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
-    final yaw = math.atan2(dir[0] / len, -dir[2] / len);
-    final pitch = math.asin((dir[1] / len).clamp(-1.0, 1.0));
-    final u = (yaw + math.pi) / (2 * math.pi) * canvasW;
-    final v = (math.pi / 2 - pitch) / math.pi * canvasH;
-    if (u < minU) minU = u;
-    if (u > maxU) maxU = u;
-    if (v < minV) minV = v;
-    if (v > maxV) maxV = v;
-  }
-  var left = (minU - 2).floor();
-  var right = (maxU + 2).ceil();
-  // Antimeridian wrap: fall back to full width.
-  if (maxU - minU > canvasW * 0.7) {
-    left = 0;
-    right = canvasW - 1;
-  }
-  return _Bounds(
-    left.clamp(0, canvasW - 1),
-    right.clamp(0, canvasW - 1),
-    (minV - 2).floor().clamp(0, canvasH - 1),
-    (maxV + 2).ceil().clamp(0, canvasH - 1),
-  );
-}
-
-List<double> _bilinear(img.Image frame, double x, double y) {
-  final x0 = x.floor().clamp(0, frame.width - 1);
-  final y0 = y.floor().clamp(0, frame.height - 1);
-  final x1 = (x0 + 1).clamp(0, frame.width - 1);
-  final y1 = (y0 + 1).clamp(0, frame.height - 1);
-  final fx = (x - x0).clamp(0.0, 1.0);
-  final fy = (y - y0).clamp(0.0, 1.0);
-  final p00 = frame.getPixel(x0, y0);
-  final p10 = frame.getPixel(x1, y0);
-  final p01 = frame.getPixel(x0, y1);
-  final p11 = frame.getPixel(x1, y1);
-  double mix(num a, num b, num c, num d) =>
-      (a * (1 - fx) * (1 - fy) +
-              b * fx * (1 - fy) +
-              c * (1 - fx) * fy +
-              d * fx * fy)
-          .toDouble();
+List<double> _matrixOf(Quat q) {
+  final x = q.x, y = q.y, z = q.z, w = q.w;
   return [
-    mix(p00.r, p10.r, p01.r, p11.r),
-    mix(p00.g, p10.g, p01.g, p11.g),
-    mix(p00.b, p10.b, p01.b, p11.b),
+    1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w),
+    2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w),
+    2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y),
   ];
 }
 
-/// Injects the GPano XMP block (§7) as an APP1 segment right after SOI so
-/// galleries and VR viewers recognize the output as a 360 photo sphere.
+class _Span {
+  final int left, width, top, bottom;
+  const _Span(this.left, this.width, this.top, this.bottom);
+}
+
+_Span _frameSpan(Quat q, double tanX, double tanY, int canvasW, int canvasH) {
+  ({double yaw, double pitch}) toAngles(List<double> d) {
+    final len = math.sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    return (
+      yaw: math.atan2(d[0], -d[2]),
+      pitch: math.asin((d[1] / len).clamp(-1.0, 1.0)),
+    );
+  }
+
+  final centre = toAngles(q.rotate(const [0, 0, -1]));
+  var minYaw = 0.0, maxYaw = 0.0;
+  var minPitch = centre.pitch, maxPitch = centre.pitch;
+  const steps = 16;
+  for (var i = 0; i <= steps; i++) {
+    final t = -1 + 2 * i / steps;
+    for (final c in [
+      [t, -1.0],
+      [t, 1.0],
+      [-1.0, t],
+      [1.0, t],
+    ]) {
+      final a = toAngles(q.rotate([c[0] * tanX, c[1] * tanY, -1.0]));
+      var dy = a.yaw - centre.yaw;
+      if (dy > math.pi) dy -= 2 * math.pi;
+      if (dy < -math.pi) dy += 2 * math.pi;
+      minYaw = math.min(minYaw, dy);
+      maxYaw = math.max(maxYaw, dy);
+      minPitch = math.min(minPitch, a.pitch);
+      maxPitch = math.max(maxPitch, a.pitch);
+    }
+  }
+
+  bool containsPole(double sign) {
+    final c = q.conjugated.rotate([0, sign, 0]);
+    if (c[2] >= 0) return false;
+    return (c[0] / -c[2]).abs() <= tanX && (c[1] / -c[2]).abs() <= tanY;
+  }
+
+  final north = containsPole(1), south = containsPole(-1);
+  if (north) maxPitch = math.pi / 2;
+  if (south) minPitch = -math.pi / 2;
+
+  final top = ((math.pi / 2 - maxPitch) / math.pi * canvasH).floor() - 1;
+  final bottom = ((math.pi / 2 - minPitch) / math.pi * canvasH).ceil() + 1;
+  int left, width;
+  if (north || south || maxYaw - minYaw > 1.9 * math.pi) {
+    left = 0;
+    width = canvasW;
+  } else {
+    final uc = (centre.yaw + math.pi) / (2 * math.pi) * canvasW;
+    final l = (uc + minYaw / (2 * math.pi) * canvasW).floor() - 1;
+    final r = (uc + maxYaw / (2 * math.pi) * canvasW).ceil() + 1;
+    left = l % canvasW;
+    width = math.min(r - l + 1, canvasW);
+  }
+  return _Span(left, width, top.clamp(0, canvasH - 1),
+      bottom.clamp(0, canvasH - 1));
+}
+
+void fillHoles(Uint8List rgb, Uint8List covered, int w, int h) {
+  final colHas = List<bool>.filled(w, false);
+  for (var u = 0; u < w; u++) {
+    var prev = -1;
+    for (var v = 0; v < h; v++) {
+      if (covered[v * w + u] != 1) continue;
+      colHas[u] = true;
+      if (v > prev + 1) {
+        for (var g = prev + 1; g < v; g++) {
+          final t = prev == -1 ? 1.0 : (g - prev) / (v - prev);
+          final a = prev == -1 ? v : prev;
+          for (var c = 0; c < 3; c++) {
+            rgb[(g * w + u) * 3 + c] = (rgb[(a * w + u) * 3 + c] * (1 - t) +
+                    rgb[(v * w + u) * 3 + c] * t)
+                .round();
+          }
+        }
+      }
+      prev = v;
+    }
+    if (prev >= 0) {
+      for (var g = prev + 1; g < h; g++) {
+        for (var c = 0; c < 3; c++) {
+          rgb[(g * w + u) * 3 + c] = rgb[(prev * w + u) * 3 + c];
+        }
+      }
+    }
+  }
+  if (!colHas.contains(true)) return;
+  for (var u = 0; u < w; u++) {
+    if (colHas[u]) continue;
+    var src = -1;
+    for (var d = 1; d < w && src == -1; d++) {
+      if (colHas[(u - d) % w]) {
+        src = (u - d) % w;
+      } else if (colHas[(u + d) % w]) {
+        src = (u + d) % w;
+      }
+    }
+    for (var v = 0; v < h; v++) {
+      for (var c = 0; c < 3; c++) {
+        rgb[(v * w + u) * 3 + c] = rgb[(v * w + src) * 3 + c];
+      }
+    }
+  }
+}
+
 Uint8List injectGpanoXmp(Uint8List jpeg, int width, int height) {
   if (jpeg.length < 4 || jpeg[0] != 0xFF || jpeg[1] != 0xD8) return jpeg;
   final xmp = '<x:xmpmeta xmlns:x="adobe:ns:meta">'

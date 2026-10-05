@@ -25,7 +25,6 @@ class IsometricRoomPainter extends CustomPainter {
     this.palette,
   });
 
-  // ─── Colors ───
   Color get _floorColor => palette?.isNotEmpty == true
       ? Color(palette!.first).withValues(alpha: 0.35)
       : const Color(0xFFF0E8D8);
@@ -52,7 +51,6 @@ class IsometricRoomPainter extends CustomPainter {
   static const Color _glass = Color(0x66ADD8E6);
   static const Color _frame = Color(0xFF5A7A8A);
 
-  // ─── 3D projection ───
   Offset _p(double x, double y, double z, double ppm, Offset c) {
     final cY = cos(rotationY), sY = sin(rotationY);
     final cX = cos(rotationX), sX = sin(rotationX);
@@ -71,14 +69,12 @@ class IsometricRoomPainter extends CustomPainter {
     return y1 * sX + z * cX;
   }
 
-  // ─── Wall inward normal (toward room center) ───
   _WallDir _wallDir(WallSegment wall) {
     final dx = wall.end.dx - wall.start.dx;
     final dy = wall.end.dy - wall.start.dy;
     final len = sqrt(dx * dx + dy * dy);
     if (len < 1e-10) return _WallDir(0, 0);
 
-    // Compute centroid of room
     double cx = 0, cy = 0;
     final walls = floorPlan.walls;
     for (final w in walls) {
@@ -88,18 +84,14 @@ class IsometricRoomPainter extends CustomPainter {
     cx /= walls.length;
     cy /= walls.length;
 
-    // Wall midpoint
     final mx = (wall.start.dx + wall.end.dx) / 2;
     final my = (wall.start.dy + wall.end.dy) / 2;
 
-    // Direction from midpoint toward centroid
     final toCx = cx - mx, toCy = cy - my;
 
-    // Two perpendicular candidates
-    final nx1 = -dy / len, ny1 = dx / len; // left perpendicular
-    final nx2 = dy / len, ny2 = -dx / len; // right perpendicular
+    final nx1 = -dy / len, ny1 = dx / len;
+    final nx2 = dy / len, ny2 = -dx / len;
 
-    // Pick the one pointing toward centroid
     if (nx1 * toCx + ny1 * toCy > 0) {
       return _WallDir(nx1, ny1);
     }
@@ -133,7 +125,6 @@ class IsometricRoomPainter extends CustomPainter {
 
     canvas.drawPath(path, Paint()..color = _floorColor);
 
-    // Planks
     canvas.save();
     canvas.clipPath(path);
     final walls = floorPlan.walls;
@@ -161,7 +152,6 @@ class IsometricRoomPainter extends CustomPainter {
     final walls = floorPlan.walls;
     final h = floorPlan.ceilingHeight;
 
-    // Sort walls back to front by midpoint depth
     final sorted = List<int>.generate(walls.length, (i) => i);
     sorted.sort((a, b) {
       final ma = walls[a].midpoint;
@@ -172,9 +162,8 @@ class IsometricRoomPainter extends CustomPainter {
     for (final i in sorted) {
       final wall = walls[i];
       final dir = _wallDir(wall);
-      final thick = 0.06; // half thickness
+      final thick = 0.06;
 
-      // 4 corners of inner wall face
       final sx = wall.start.dx + dir.nx * thick;
       final sy = wall.start.dy + dir.ny * thick;
       final ex = wall.end.dx + dir.nx * thick;
@@ -195,7 +184,6 @@ class IsometricRoomPainter extends CustomPainter {
       canvas.drawPath(wallPath, Paint()..color = _wallColor(i));
       canvas.drawPath(wallPath, Paint()..color = _wallStroke..style = PaintingStyle.stroke..strokeWidth = 0.6);
 
-      // Top edge
       final oBl = _p(wall.start.dx, wall.start.dy, h, ppm, c);
       final oBr = _p(wall.end.dx, wall.end.dy, h, ppm, c);
       canvas.drawLine(oBl, oBr, Paint()..color = _wallStroke.withValues(alpha: 0.3)..strokeWidth = 0.4);
@@ -214,7 +202,6 @@ class IsometricRoomPainter extends CustomPainter {
     final l = (pos - halfW).clamp(0.0, 1.0);
     final r = (pos + halfW).clamp(0.0, 1.0);
 
-    // Door face
     final pts = [
       _p(wall.start.dx + (wall.end.dx - wall.start.dx) * l + dir.nx * thick,
          wall.start.dy + (wall.end.dy - wall.start.dy) * l + dir.ny * thick, 0.01, ppm, c),
@@ -233,7 +220,6 @@ class IsometricRoomPainter extends CustomPainter {
     canvas.drawPath(path, Paint()..color = _doorFill(door.wallIndex));
     canvas.drawPath(path, Paint()..color = const Color(0xFF5A3E2A)..style = PaintingStyle.stroke..strokeWidth = 2.5);
 
-    // Handle
     final hs = door.swing == DoorSwing.left || door.swing == DoorSwing.double ? 0.75 : 0.25;
     final hp = l + (r - l) * hs;
     final hx = wall.start.dx + (wall.end.dx - wall.start.dx) * hp + dir.nx * thick;
@@ -271,13 +257,11 @@ class IsometricRoomPainter extends CustomPainter {
     canvas.drawPath(glass, Paint()..color = _glass);
     canvas.drawPath(glass, Paint()..color = _frame..style = PaintingStyle.stroke..strokeWidth = 2.5);
 
-    // Cross bars
     final midH = (sill + top) / 2;
     canvas.drawLine(wp(l, midH), wp(r, midH), Paint()..color = _frame..strokeWidth = 1.2);
     final midT = (l + r) / 2;
     canvas.drawLine(wp(midT, sill), wp(midT, top), Paint()..color = _frame..strokeWidth = 1.2);
 
-    // Highlight
     canvas.drawLine(wp(l + (r - l) * 0.15, top - (top - sill) * 0.1), wp(l + (r - l) * 0.35, sill + (top - sill) * 0.1),
         Paint()..color = Colors.white.withValues(alpha: 0.25)..strokeWidth = 1.5);
   }

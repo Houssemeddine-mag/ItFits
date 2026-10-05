@@ -1,6 +1,43 @@
 import 'dart:convert';
+import 'dart:isolate';
+import 'dart:math' as math;
+import 'dart:typed_data';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:image/image.dart' as img;
 import 'package:uuid/uuid.dart';
+
+const int _maxInlineJpegBytes = 680 * 1024;
+
+Future<Uint8List> fitImageForFirestore(Uint8List bytes) async {
+  if (bytes.length <= _maxInlineJpegBytes) return bytes;
+  return Isolate.run(() {
+    final decoded = img.decodeImage(bytes);
+    if (decoded == null) return bytes;
+    var width = math.min(decoded.width, 2048);
+    var quality = 85;
+    while (true) {
+      final resized = width < decoded.width
+          ? img.copyResize(decoded,
+              width: width, interpolation: img.Interpolation.average)
+          : decoded;
+      final out = Uint8List.fromList(img.encodeJpg(resized, quality: quality));
+      if (out.length <= _maxInlineJpegBytes || width <= 512) return out;
+      width = (width * 0.8).round();
+      quality = math.max(70, quality - 5);
+    }
+  });
+}
+
+Future<String> fitDataUrlForFirestore(String url) async {
+  if (!url.startsWith('data:') || url.length <= _maxInlineJpegBytes) {
+    return url;
+  }
+  final bytes = base64Decode(url.substring(url.indexOf(',') + 1));
+  final fitted = await fitImageForFirestore(bytes);
+  if (identical(fitted, bytes)) return url;
+  return 'data:image/jpeg;base64,${base64Encode(fitted)}';
+}
 
 class CapturedImageData {
   final String id;
@@ -98,7 +135,8 @@ class FirestoreImageService {
       );
     }
     final id = _uuid.v4();
-    final base64Data = base64Encode(imageBytes);
+    final base64Data = base64Encode(
+        await fitImageForFirestore(Uint8List.fromList(imageBytes)));
     final data = CapturedImageData(
       id: id,
       base64Data: base64Data,
@@ -190,7 +228,7 @@ class FirestoreImageService {
     final id = _uuid.v4();
     final data = GeneratedDesignData(
       id: id,
-      imageUrl: imageUrl,
+      imageUrl: await fitDataUrlForFirestore(imageUrl),
       style: style,
       prompt: prompt,
       createdAt: DateTime.now(),

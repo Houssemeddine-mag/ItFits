@@ -4,6 +4,15 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 
+import 'project_service.dart';
+
+class RecentLoginRequiredException implements Exception {
+  const RecentLoginRequiredException();
+  @override
+  String toString() =>
+      'For your security, sign out and sign back in, then delete your account.';
+}
+
 class _DummyUser implements User {
   @override
   final String uid = 'dummy-user-001';
@@ -23,8 +32,6 @@ class _DummyUser implements User {
 class AuthService {
   late final FirebaseAuth _auth;
   late final FirebaseFirestore _firestore;
-  // google_sign_in v7 uses a singleton + explicit initialize(). The flag
-  // guarantees initialize() runs exactly once, as the plugin requires.
   bool _googleInitialized = false;
 
   Future<void> _ensureGoogleInitialized() async {
@@ -39,12 +46,14 @@ class AuthService {
   AuthService(FirebaseAuth auth, FirebaseFirestore firestore)
       : _auth = auth,
         _firestore = firestore,
-        _isDummy = false;
+        _isDummy = false {
+    _auth.authStateChanges().listen((_) {
+      _authNotifier.value = !_authNotifier.value;
+    });
+  }
 
   AuthService.dummy()
       : _isDummy = true,
-        // Start demo mode already signed in so project creation and
-        // navigation work without Firebase configuration.
         _dummyUser = const _DummyUser();
 
   ValueNotifier<bool> get authNotifier => _authNotifier;
@@ -111,8 +120,13 @@ class AuthService {
         email: email,
         password: password,
       );
-      await credential.user?.updateDisplayName(displayName);
-      await _createUserProfile(credential.user!);
+      try {
+        await credential.user?.updateDisplayName(displayName);
+        await credential.user?.reload();
+      } catch (e) {
+        debugPrint('Display name update failed: $e');
+      }
+      await _createUserProfile(_auth.currentUser ?? credential.user!);
       return credential;
     } on FirebaseAuthException catch (e) {
       throw _handleAuthException(e);
@@ -130,7 +144,6 @@ class AuthService {
       final GoogleSignInAccount googleUser =
           await GoogleSignIn.instance.authenticate();
 
-      // v7 exposes only the ID token here; it is sufficient for Firebase.
       final GoogleSignInAuthentication googleAuth = googleUser.authentication;
       final credential = GoogleAuthProvider.credential(
         idToken: googleAuth.idToken,
@@ -140,7 +153,6 @@ class AuthService {
       await _createUserProfile(userCredential.user!);
       return userCredential;
     } on GoogleSignInException catch (e) {
-      // User cancelled the flow: behave like the old null return.
       if (e.code == GoogleSignInExceptionCode.canceled) return null;
       throw Exception('Google sign-in failed: ${e.description ?? e.code.name}');
     } on FirebaseAuthException catch (e) {
@@ -185,7 +197,6 @@ class AuthService {
       await _ensureGoogleInitialized();
       await GoogleSignIn.instance.signOut();
     } catch (_) {
-      // Sign-out must never fail (e.g. Google never initialized).
     }
     await _auth.signOut();
   }
@@ -254,13 +265,22 @@ class AuthService {
       return;
     }
     final user = _auth.currentUser;
-    if (user != null) {
-      try {
-        await _firestore.collection('users').doc(user.uid).delete();
-      } catch (_) {}
-      try {
-        await user.delete();
-      } catch (_) {}
+    if (user == null) return;
+
+    final lastSignIn = user.metadata.lastSignInTime;
+    if (lastSignIn == null ||
+        DateTime.now().difference(lastSignIn) > const Duration(minutes: 5)) {
+      throw const RecentLoginRequiredException();
+    }
+
+    await ProjectService.deleteUserTree(_firestore, user.uid);
+    try {
+      await user.delete();
+    } on FirebaseAuthException catch (e) {
+      if (e.code == 'requires-recent-login') {
+        throw const RecentLoginRequiredException();
+      }
+      rethrow;
     }
   }
 
@@ -271,9 +291,12 @@ class AuthService {
       case 'email-already-in-use':
         return Exception('An account already exists for that email.');
       case 'user-not-found':
-        return Exception('No user found for that email.');
       case 'wrong-password':
-        return Exception('Wrong password provided.');
+      case 'invalid-credential':
+      case 'INVALID_LOGIN_CREDENTIALS':
+        return Exception('Incorrect email or password.');
+      case 'network-request-failed':
+        return Exception('No connection to the server. Check your internet.');
       case 'invalid-email':
         return Exception('The email address is not valid.');
       case 'user-disabled':
@@ -281,9 +304,9 @@ class AuthService {
       case 'too-many-requests':
         return Exception('Too many requests. Try again later.');
       case 'operation-not-allowed':
-        return Exception('Operation not allowed.');
+        return Exception('This sign-in method is not enabled.');
       default:
-        return Exception('An error occurred: ${e.message}');
+        return Exception('Sign-in failed (${e.code}): ${e.message}');
     }
   }
 }

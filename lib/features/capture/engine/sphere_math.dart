@@ -1,34 +1,21 @@
 import 'dart:math' as math;
 
-/// Pure-Dart math core of the offline 360 photo-sphere engine.
-///
-/// Conventions (right-handed, Y-up start frame):
-/// * A [Quat] maps vectors from the CURRENT device frame into the START frame
-///   (the device pose when the capture session began, identity = start).
-/// * The camera looks along -Z in device space; "up" is +Y.
-/// * A [SphereTarget] with yaw/pitch offsets defines a target orientation
-///   `qTarget = qYaw(yaw) * qPitch(pitch)` in the start frame.
-/// * Capture error = angular distance between current pose and target pose.
 class Quat {
   final double x, y, z, w;
   const Quat(this.x, this.y, this.z, this.w);
 
   static const identity = Quat(0, 0, 0, 1);
 
-  /// Rotation of [angleRad] about the Y axis (yaw).
-  /// Right-turning / clockwise: +yaw moves the camera forward (-Z) towards +X (right).
   factory Quat.yaw(double angleRad) {
     final h = -angleRad / 2;
     return Quat(0, math.sin(h), 0, math.cos(h));
   }
 
-  /// Rotation of [angleRad] about the X axis (pitch, +up).
   factory Quat.pitch(double angleRad) {
     final h = angleRad / 2;
     return Quat(math.sin(h), 0, 0, math.cos(h));
   }
 
-  /// Hamilton product: apply [other] first, then this.
   Quat operator *(Quat other) => Quat(
         w * other.x + x * other.w + y * other.z - z * other.y,
         w * other.y - x * other.z + y * other.w + z * other.x,
@@ -46,14 +33,12 @@ class Quat {
 
   double dot(Quat other) => x * other.x + y * other.y + z * other.z + w * other.w;
 
-  /// Rotates vector [v] ([x, y, z]) by this quaternion.
   List<double> rotate(List<double> v) {
     final qv = Quat(v[0], v[1], v[2], 0);
     final r = this * qv * conjugated;
     return [r.x, r.y, r.z];
   }
 
-  /// Builds a quaternion from a row-major 3x3 rotation matrix.
   factory Quat.fromRotationMatrix(List<double> m) {
     final trace = m[0] + m[4] + m[8];
     double x, y, z, w;
@@ -91,15 +76,38 @@ class Quat {
       Quat(l[0], l[1], l[2], l[3]).normalized;
 }
 
-/// Angular distance in degrees between two orientations.
 double angularDistanceDeg(Quat a, Quat b) {
   final d = a.normalized.dot(b.normalized).abs().clamp(-1.0, 1.0);
   return 2.0 * math.acos(d) * 180.0 / math.pi;
 }
 
+double viewAngleDeg(Quat pose, SphereTarget target) {
+  final a = pose.rotate(const [0, 0, -1]);
+  final b = target.direction;
+  final d = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]).clamp(-1.0, 1.0);
+  return math.acos(d) * 180.0 / math.pi;
+}
+
+class CameraFov {
+  final double tanHalfWidth;
+
+  final double tanHalfHeight;
+
+  const CameraFov(this.tanHalfWidth, this.tanHalfHeight);
+
+  static final typical = CameraFov.from35mm(26, 4 / 3);
+
+  factory CameraFov.from35mm(double focal35, double aspect) {
+    final tanLong = (43.27 * 0.8 / 2) / focal35;
+    return CameraFov(tanLong / aspect, tanLong);
+  }
+
+  double get horizontalDeg => 2 * math.atan(tanHalfWidth) * 180 / math.pi;
+  double get verticalDeg => 2 * math.atan(tanHalfHeight) * 180 / math.pi;
+}
+
 enum SphereRing { equator, upper, lower, zenith, nadir }
 
-/// One acquisition target on the virtual sphere (§2 of the guide).
 class SphereTarget {
   final String id;
   final double yawDeg;
@@ -113,46 +121,38 @@ class SphereTarget {
     required this.ring,
   });
 
-  /// Target orientation in the start frame.
   Quat get orientation {
     const d2r = math.pi / 180.0;
     return (Quat.yaw(yawDeg * d2r) * Quat.pitch(pitchDeg * d2r)).normalized;
   }
 
-  /// Target view direction in the start frame.
   List<double> get direction =>
       orientation.rotate(const [0, 0, -1]);
 }
 
-/// Builds the capture lattice: a 12-frame guided tour derived from §2 of
-/// the guide. Listed in capture order so the UI can walk the user through
-/// one target at a time: full turn around the horizon, then upper, lower,
-/// zenith and nadir.
-/// 6 equator (60° steps) + 2 upper (+50°) + 2 lower (−50°) + zenith + nadir.
-/// With a ~70° lens this still closes the sphere with healthy overlap.
 List<SphereTarget> buildSphereLattice() {
   final targets = <SphereTarget>[];
-  for (var i = 0; i < 6; i++) {
+  for (var i = 0; i < 8; i++) {
     targets.add(SphereTarget(
       id: 'eq-$i',
-      yawDeg: i * 60.0,
+      yawDeg: i * 45.0,
       pitchDeg: 0,
       ring: SphereRing.equator,
     ));
   }
-  for (var i = 0; i < 2; i++) {
+  for (var i = 0; i < 6; i++) {
     targets.add(SphereTarget(
       id: 'up-$i',
-      yawDeg: 90.0 + i * 180.0,
-      pitchDeg: 50,
+      yawDeg: 22.5 + i * 60.0,
+      pitchDeg: 45,
       ring: SphereRing.upper,
     ));
   }
-  for (var i = 0; i < 2; i++) {
+  for (var i = 0; i < 6; i++) {
     targets.add(SphereTarget(
       id: 'lo-$i',
-      yawDeg: i * 180.0,
-      pitchDeg: -50,
+      yawDeg: i * 60.0,
+      pitchDeg: -45,
       ring: SphereRing.lower,
     ));
   }
@@ -163,7 +163,6 @@ List<SphereTarget> buildSphereLattice() {
   return targets;
 }
 
-/// Wraps degrees to [-180, 180).
 double wrapAngleDeg(double deg) {
   var d = deg % 360.0;
   if (d >= 180.0) d -= 360.0;
@@ -171,11 +170,6 @@ double wrapAngleDeg(double deg) {
   return d;
 }
 
-/// Picks the active capture target with stickiness (hysteresis).
-///
-/// Returns [current] while it stays open and within [stickRadiusDeg] of the
-/// pose, so the guide never jumps between targets mid-aim. Otherwise falls
-/// back to the nearest open target, or null when everything is captured.
 SphereTarget? selectStickyTarget({
   required List<SphereTarget> targets,
   required Set<String> done,
@@ -186,14 +180,14 @@ SphereTarget? selectStickyTarget({
   if (current != null &&
       !done.contains(current.id) &&
       targets.any((t) => t.id == current.id) &&
-      angularDistanceDeg(pose, current.orientation) <= stickRadiusDeg) {
+      viewAngleDeg(pose, current) <= stickRadiusDeg) {
     return current;
   }
   SphereTarget? best;
   var bestErr = double.infinity;
   for (final t in targets) {
     if (done.contains(t.id)) continue;
-    final err = angularDistanceDeg(pose, t.orientation);
+    final err = viewAngleDeg(pose, t);
     if (err < bestErr) {
       bestErr = err;
       best = t;
@@ -202,36 +196,52 @@ SphereTarget? selectStickyTarget({
   return best;
 }
 
-/// Relative orientation from fused yaw/pitch/roll deltas (radians).
-///
-/// Used with gyro-fused rotation-vector sensors: yaw/pitch/roll are sampled
-/// at session start (yaw0/pitch0/roll0) and every delta is measured from
-/// there, so no magnetometer — and none of its indoor jumpiness — is
-/// involved. Same yaw→pitch→roll composition order as [SphereTarget].
-Quat relativeQuatFromDeltas({
-  required double yaw,
-  required double yaw0,
-  required double pitch,
-  required double pitch0,
-  required double roll,
-  required double roll0,
-}) {
-  // In dchs_motion_sensors on Android, yaw decreases as device rotates clockwise (to the right).
-  // Negating (yaw - yaw0) makes right turns positive, matching SphereTarget's clockwise tour.
-  final dy = wrapAngleDeg((yaw0 - yaw) * 180.0 / math.pi) * math.pi / 180.0;
-  final dp = (pitch - pitch0);
-  final dr = (roll - roll0);
-  return (Quat.yaw(dy) * Quat.pitch(dp) * _rollQuat(dr)).normalized;
+List<double> deviceToWorldFromEuler(double yaw, double pitch, double roll) {
+  final cy = math.cos(yaw), sy = math.sin(yaw);
+  final cp = math.cos(pitch), sp = math.sin(pitch);
+  final cr = math.cos(roll), sr = math.sin(roll);
+  return [
+    cy * cr - sy * sp * sr, -sy * cp, cy * sr + sy * sp * cr,
+    sy * cr + cy * sp * sr, cy * cp, sy * sr - cy * sp * cr,
+    -cp * sr, sp, cp * cr,
+  ];
 }
 
-Quat _rollQuat(double angleRad) {
-  final h = angleRad / 2;
-  return Quat(0, 0, math.sin(h), math.cos(h));
+class LevelFrame {
+  final List<double> rows;
+  const LevelFrame._(this.rows);
+
+  factory LevelFrame.fromStartPose(List<double> r0) {
+    var hx = -r0[2], hy = -r0[5];
+    if (math.sqrt(hx * hx + hy * hy) < 0.25) {
+      final sign = -r0[8] < 0 ? 1.0 : -1.0;
+      hx = sign * r0[1];
+      hy = sign * r0[4];
+    }
+    final n = math.sqrt(hx * hx + hy * hy);
+    if (n < 1e-9) {
+      hx = 0;
+      hy = 1;
+    } else {
+      hx /= n;
+      hy /= n;
+    }
+    return LevelFrame._([hy, -hx, 0, 0, 0, 1, -hx, -hy, 0]);
+  }
+
+  Quat relativePose(List<double> r) {
+    final m = List<double>.filled(9, 0);
+    for (var i = 0; i < 3; i++) {
+      for (var j = 0; j < 3; j++) {
+        m[i * 3 + j] = rows[i * 3] * r[j] +
+            rows[i * 3 + 1] * r[3 + j] +
+            rows[i * 3 + 2] * r[6 + j];
+      }
+    }
+    return Quat.fromRotationMatrix(m);
+  }
 }
 
-/// Android SensorManager.getRotationMatrix() port.
-/// [gravity] and [geomagnetic] are raw sensor vectors (device frame).
-/// Returns row-major 3x3 (world→device), or null if unsolvable.
 List<double>? rotationMatrixFromSensors(
     List<double> gravity, List<double> geomagnetic) {
   final ax = gravity[0], ay = gravity[1], az = gravity[2];
