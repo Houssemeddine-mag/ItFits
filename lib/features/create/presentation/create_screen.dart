@@ -136,7 +136,16 @@ class _CreateScreenState extends ConsumerState<CreateScreen> {
       final authService = ref.read(authServiceProvider);
       final projectService = ref.read(projectServiceProvider);
       final user = authService.currentUser;
-      final userId = user?.uid ?? 'anonymous';
+      // Never fall back to 'anonymous' — that leaked projects across accounts.
+      if (user == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Sign in to create a project')),
+          );
+        }
+        return;
+      }
+      final userId = user.uid;
 
       final roomType = ref.read(selectedRoomTypeProvider);
       final styleName = ref.read(selectedStyleNameProvider);

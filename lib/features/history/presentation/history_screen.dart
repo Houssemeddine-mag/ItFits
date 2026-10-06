@@ -16,11 +16,10 @@ String _normalizeRoom(String s) =>
     s.toLowerCase().replaceAll(RegExp(r'[_\s]'), '');
 
 final historyProjectsProvider = StreamProvider<List<ProjectModel>>((ref) {
-  final projectService = ref.read(projectServiceProvider);
-  final authService = ref.read(authServiceProvider);
-  final user = authService.currentUser;
-  if (user == null) return Stream.value(const <ProjectModel>[]);
-  return projectService.watchUserProjects(user.uid);
+  final uid = ref.watch(authStateProvider).asData?.value?.uid;
+  if (uid == null) return Stream.value(const <ProjectModel>[]);
+  final projectService = ref.watch(projectServiceProvider);
+  return projectService.watchUserProjects(uid);
 });
 
 enum HistoryFilter { all, livingRoom, bedroom, kitchen, bathroom, office }

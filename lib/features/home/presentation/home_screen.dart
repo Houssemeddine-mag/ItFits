@@ -10,11 +10,10 @@ import 'package:itfits/core/services/project_stage.dart'
     show isProjectComplete, stageLabelFor;
 
 final homeProjectsProvider = StreamProvider<List<ProjectModel>>((ref) {
-  final projectService = ref.read(projectServiceProvider);
-  final authService = ref.read(authServiceProvider);
-  final user = authService.currentUser;
-  if (user == null) return Stream.value(const <ProjectModel>[]);
-  return projectService.watchUserProjects(user.uid);
+  final uid = ref.watch(authStateProvider).asData?.value?.uid;
+  if (uid == null) return Stream.value(const <ProjectModel>[]);
+  final projectService = ref.watch(projectServiceProvider);
+  return projectService.watchUserProjects(uid);
 });
 
 class HomeScreen extends ConsumerWidget {

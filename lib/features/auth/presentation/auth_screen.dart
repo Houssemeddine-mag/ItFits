@@ -46,16 +46,22 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
     try {
       final authService = ref.read(authServiceProvider);
       if (_isLogin) {
-        await authService.signInWithEmail(
+        final cred = await authService.signInWithEmail(
           _emailController.text.trim().toLowerCase(),
           _passwordController.text,
         );
+        debugPrint('Signed in as ${cred.user?.uid} ${cred.user?.email}');
       } else {
         await authService.signUpWithEmail(
           _emailController.text.trim().toLowerCase(),
           _passwordController.text,
           _nameController.text.trim(),
         );
+        if (mounted) {
+          // New accounts verify email first.
+          context.go('/verify-email');
+          return;
+        }
       }
       if (mounted) context.go('/');
     } catch (e) {

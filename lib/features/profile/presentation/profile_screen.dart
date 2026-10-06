@@ -9,16 +9,65 @@ import 'package:itfits/core/services/providers.dart';
 import 'package:itfits/core/models/project_model.dart';
 
 final userProfileProvider = FutureProvider<Map<String, dynamic>?>((ref) async {
-  final authService = ref.read(authServiceProvider);
-  return authService.getUserProfile();
+  // Reactive: re-fetches whenever the signed-in uid changes.
+  // Previously used ref.read(currentUser) once → stuck on old account.
+  final user = ref.watch(authStateProvider).asData?.value;
+  if (user == null) return null;
+  if (!firebaseReady) {
+    // Offline fallback: surface Auth metadata so UI never shows another user.
+    return {
+      'uid': user.uid,
+      'email': user.email,
+      'displayName': user.displayName ?? 'User',
+      'photoURL': user.photoURL,
+      'plan': 'free',
+    };
+  }
+  try {
+    final db = ref.watch(firebaseFirestoreProvider);
+    final docRef = db.collection('users').doc(user.uid);
+    var doc = await docRef.get();
+    if (!doc.exists) {
+      // Console-created users lack a profile doc — create then retry.
+      await ref.read(authServiceProvider).getUserProfile();
+      doc = await docRef.get();
+      if (!doc.exists) {
+        return {
+          'uid': user.uid,
+          'email': user.email,
+          'displayName': user.displayName ?? 'User',
+          'photoURL': user.photoURL,
+          'plan': 'free',
+        };
+      }
+    }
+    final data = doc.data();
+    // Always overlay live Auth values so email/name can never be stale.
+    if (data != null) {
+      data['uid'] = user.uid;
+      data['email'] = user.email ?? data['email'];
+      data['displayName'] = (data['displayName'] as String?)?.isNotEmpty == true
+          ? data['displayName']
+          : (user.displayName ?? 'User');
+      data['photoURL'] = data['photoURL'] ?? user.photoURL;
+    }
+    return data;
+  } catch (_) {
+    return {
+      'uid': user.uid,
+      'email': user.email,
+      'displayName': user.displayName ?? 'User',
+      'photoURL': user.photoURL,
+      'plan': 'free',
+    };
+  }
 });
 
 final userProjectsCountProvider = StreamProvider<List<ProjectModel>>((ref) {
-  final projectService = ref.read(projectServiceProvider);
-  final authService = ref.read(authServiceProvider);
-  final user = authService.currentUser;
-  if (user == null) return Stream.value(const <ProjectModel>[]);
-  return projectService.watchUserProjects(user.uid);
+  final uid = ref.watch(authStateProvider).asData?.value?.uid;
+  if (uid == null) return Stream.value(const <ProjectModel>[]);
+  final projectService = ref.watch(projectServiceProvider);
+  return projectService.watchUserProjects(uid);
 });
 
 class ProfileScreen extends ConsumerWidget {
@@ -438,6 +487,16 @@ class _AccountCard extends ConsumerWidget {
     );
   }
 
+  void _clearUserScopedState(WidgetRef ref) {
+    ref.invalidate(userProfileProvider);
+    ref.invalidate(userProjectsCountProvider);
+    ref.read(currentProjectProvider.notifier).state = null;
+    ref.read(capturedImagesProvider.notifier).state = [];
+    ref.read(capturedImageIdsProvider.notifier).state = [];
+    ref.read(generatedDesignsProvider.notifier).state = [];
+    ref.read(generatedDesignUrlsProvider.notifier).state = [];
+  }
+
   void _showDeleteConfirmation(BuildContext context, WidgetRef ref) {
     showDialog(
       context: context,
@@ -465,6 +524,7 @@ class _AccountCard extends ConsumerWidget {
                 }
                 return;
               }
+              _clearUserScopedState(ref);
               if (context.mounted) context.go('/onboarding');
             },
             style: FilledButton.styleFrom(backgroundColor: Theme.of(context).colorScheme.error),
@@ -491,6 +551,7 @@ class _AccountCard extends ConsumerWidget {
               Navigator.pop(dialogContext);
               final authService = ref.read(authServiceProvider);
               await authService.signOut();
+              _clearUserScopedState(ref);
               if (context.mounted) context.go('/onboarding');
             },
             child: const Text('Log Out'),
