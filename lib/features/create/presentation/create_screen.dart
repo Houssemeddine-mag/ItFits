@@ -12,6 +12,8 @@ import 'package:itfits/features/create/presentation/ai_chat_screen.dart';
 import 'package:itfits/features/create/presentation/design_generation_screen.dart';
 import 'package:itfits/features/create/presentation/design_result_screen.dart';
 import 'package:itfits/core/models/project_model.dart';
+import 'package:itfits/core/services/ai_design_service.dart'
+    show GeneratedDesignResult;
 import 'package:itfits/core/services/providers.dart';
 import 'package:itfits/core/services/project_stage.dart'
     show floorPlanDataFromModel, floorPlanModelFromData, stepIndexForStatus;
@@ -233,6 +235,12 @@ class _CreateScreenState extends ConsumerState<CreateScreen> {
   }
 
   /// Restores wizard state for an unfinished project and jumps to its stage.
+  ///
+  /// Previously this left stale cross-project state behind (style id,
+  /// palette index, chat, old designs) and never restored generated designs,
+  /// so resuming could land on a step whose screen read inconsistent
+  /// providers and red-screened. Now: reset first, restore everything the
+  /// step screens read, and clamp the landing step so Continue never crashes.
   Future<void> _resumeProject(String projectId) async {
     setState(() => _isResuming = true);
     try {
@@ -244,6 +252,8 @@ class _CreateScreenState extends ConsumerState<CreateScreen> {
         _resetWizardState();
         return;
       }
+      // Start clean — stale ids/urls from another project must not leak in.
+      _resetWizardState();
       final projects = await projectService.getUserProjects(user.uid);
       ProjectModel? found;
       for (final p in projects) {
@@ -264,11 +274,39 @@ class _CreateScreenState extends ConsumerState<CreateScreen> {
           project.secondaryColor,
           project.accentColor,
         ];
+        // Style screen works with ids/indices, not names — map them back so
+        // the palette list and save path don't hit firstWhere on null.
+        try {
+          final match = designStyles.where(
+            (s) => s.name.toLowerCase() == project.style.toLowerCase(),
+          );
+          if (match.isNotEmpty) {
+            final style = match.first;
+            ref.read(selectedStyleProvider.notifier).state = style.id;
+            final palIdx = style.colorPalettes.indexWhere(
+              (p) => p.colors.isNotEmpty && p.colors.first == project.primaryColor,
+            );
+            ref.read(selectedPaletteProvider.notifier).state =
+                palIdx >= 0 ? palIdx : 0;
+          }
+        } catch (e) {
+          debugPrint('Style restore failed: $e');
+        }
       }
       if (project.floorPlan != null) {
         try {
-          ref.read(floorPlanDataProvider.notifier).state =
-              floorPlanDataFromModel(project.floorPlan!);
+          final restored = floorPlanDataFromModel(project.floorPlan!);
+          // Guard against docs with openings but no walls (index crash in
+          // painters): drop orphaned elements.
+          if (restored.walls.isEmpty &&
+              (restored.doors.isNotEmpty ||
+                  restored.windows.isNotEmpty ||
+                  restored.outlets.isNotEmpty)) {
+            restored.doors.clear();
+            restored.windows.clear();
+            restored.outlets.clear();
+          }
+          ref.read(floorPlanDataProvider.notifier).state = restored;
         } catch (e) {
           debugPrint('Floor plan restore failed: $e');
         }
@@ -288,7 +326,47 @@ class _CreateScreenState extends ConsumerState<CreateScreen> {
       } catch (e) {
         debugPrint('Captured image restore failed: $e');
       }
-      final step = stepIndexForStatus(project.status);
+      // Result step reads in-memory urls — refill from the doc so a
+      // finished project doesn't land on an empty result screen.
+      try {
+        final inlineUrls = (project.generatedDesigns ?? [])
+            .map((d) => d.panoramaUrl)
+            .where((u) => u.isNotEmpty)
+            .toList();
+        if (inlineUrls.isNotEmpty) {
+          ref.read(generatedDesignUrlsProvider.notifier).state = inlineUrls;
+          ref.read(generatedDesignsProvider.notifier).state = inlineUrls
+              .map((u) => GeneratedDesignResult(
+                    imageUrl: u,
+                    style: project.style,
+                    prompt: '',
+                    createdAt: DateTime.now(),
+                  ))
+              .toList();
+        } else if (project.panoramaUrl != null &&
+            project.panoramaUrl!.isNotEmpty) {
+          ref.read(generatedDesignUrlsProvider.notifier).state = [
+            project.panoramaUrl!
+          ];
+        } else {
+          final docs = await imageService.getGeneratedDesigns(
+            userId: user.uid,
+            projectId: project.id,
+          );
+          if (docs.isNotEmpty && mounted) {
+            ref.read(generatedDesignUrlsProvider.notifier).state =
+                docs.map((d) => d.imageUrl).toList();
+          }
+        }
+      } catch (e) {
+        debugPrint('Design restore failed: $e');
+      }
+      var step = stepIndexForStatus(project.status).clamp(0, _steps.length - 1);
+      // Panorama step with no images red-screened the review screen's decode
+      // path on some devices — send them to capture instead.
+      if (step == 1 && ref.read(capturedImagesProvider).isEmpty) {
+        step = 0;
+      }
       if (mounted) {
         setState(() {
           _currentStep = step;
@@ -296,10 +374,28 @@ class _CreateScreenState extends ConsumerState<CreateScreen> {
         });
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted && _pageController.hasClients) {
-            _pageController.jumpToPage(step);
+            try {
+              _pageController.jumpToPage(step);
+            } catch (e) {
+              debugPrint('Resume jump failed: $e');
+            }
           }
         });
         return;
+      }
+    } catch (e) {
+      debugPrint('Resume failed, starting fresh capture: $e');
+      if (mounted) {
+        _resetWizardState();
+        setState(() {
+          _currentStep = 0;
+          _isResuming = false;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Could not resume — starting a fresh capture'),
+          ),
+        );
       }
     } finally {
       if (mounted) setState(() => _isResuming = false);

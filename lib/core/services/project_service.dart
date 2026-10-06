@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:uuid/uuid.dart';
 
 import '../models/project_model.dart';
+import 'firestore_image_service.dart' show fitDataUrlThumbnail;
 
 class ProjectService {
   final FirebaseFirestore? _firestore;
@@ -122,7 +123,9 @@ class ProjectService {
           .doc(projectId)
           .update({
         'status': status.name,
-        'updatedAt': FieldValue.serverTimestamp(),
+        // ISO string (not serverTimestamp): ProjectModel parses both, but
+        // mixing types breaks orderBy('updatedAt') and old readers.
+        'updatedAt': DateTime.now().toIso8601String(),
       });
     } catch (_) {}
   }
@@ -150,7 +153,7 @@ class ProjectService {
           .update({
         'floorPlan': floorPlan.toJson(),
         'status': ProjectStatus.reviewingPlan.name,
-        'updatedAt': FieldValue.serverTimestamp(),
+        'updatedAt': DateTime.now().toIso8601String(),
       });
     } catch (_) {}
   }
@@ -193,19 +196,32 @@ class ProjectService {
         'backgroundColor': backgroundColor,
         'surfaceColor': surfaceColor,
         'status': ProjectStatus.styling.name,
-        'updatedAt': FieldValue.serverTimestamp(),
+        'updatedAt': DateTime.now().toIso8601String(),
       });
     } catch (_) {}
   }
 
+  /// Publishes a finished design so lists render instantly.
+  ///
+  /// The full-resolution image lives in the `designs` subcollection
+  /// (written by the generation screen). Here we store only a small
+  /// thumbnail inline + top-level `panoramaUrl` and flip status to
+  /// complete — previously nothing updated the project doc, so History,
+  /// Home and the detail hero kept showing placeholders forever.
   Future<void> addGeneratedDesign(String userId, String projectId, GeneratedDesignModel design) async {
+    GeneratedDesignModel thumbDesign = design;
+    try {
+      final thumbUrl = await fitDataUrlThumbnail(design.panoramaUrl);
+      thumbDesign = design.copyWith(panoramaUrl: thumbUrl);
+    } catch (_) {}
     if (_isDummy) {
       final index = _dummyProjects
           .indexWhere((p) => p.id == projectId && p.userId == userId);
       if (index != -1) {
         final current = _dummyProjects[index];
         _dummyProjects[index] = current.copyWith(
-          generatedDesigns: [...?current.generatedDesigns, design],
+          generatedDesigns: [...?current.generatedDesigns, thumbDesign],
+          panoramaUrl: thumbDesign.panoramaUrl,
           status: ProjectStatus.complete,
           updatedAt: DateTime.now(),
         );
@@ -220,11 +236,14 @@ class ProjectService {
           .collection('projects')
           .doc(projectId)
           .update({
-        'generatedDesigns': FieldValue.arrayUnion([design.toJson()]),
+        'generatedDesigns': FieldValue.arrayUnion([thumbDesign.toJson()]),
+        'panoramaUrl': thumbDesign.panoramaUrl,
         'status': ProjectStatus.complete.name,
-        'updatedAt': FieldValue.serverTimestamp(),
+        'updatedAt': DateTime.now().toIso8601String(),
       });
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('Publish design failed (doc may exceed 1MB): $e');
+    }
   }
 
   Future<void> deleteProject(String userId, String projectId) async {
@@ -289,7 +308,12 @@ class ProjectService {
         .snapshots()
         .map((doc) {
       if (!doc.exists) return null;
-      return ProjectModel.fromJson(doc.data()!);
+      try {
+        return ProjectModel.fromJson(doc.data()!);
+      } catch (e) {
+        debugPrint('Skipping unparsable project ${doc.id}: $e');
+        return null;
+      }
     }).handleError((_) => null);
   }
 
@@ -305,7 +329,15 @@ class ProjectService {
         .orderBy('updatedAt', descending: true)
         .snapshots()
         .map((snapshot) {
-      return snapshot.docs.map((doc) => ProjectModel.fromJson(doc.data())).toList();
+      final projects = <ProjectModel>[];
+      for (final doc in snapshot.docs) {
+        try {
+          projects.add(ProjectModel.fromJson(doc.data()));
+        } catch (e) {
+          debugPrint('Skipping unparsable project ${doc.id}: $e');
+        }
+      }
+      return projects;
     }).handleError((_) => <ProjectModel>[]);
   }
 
@@ -318,7 +350,15 @@ class ProjectService {
           .collection('projects')
           .orderBy('updatedAt', descending: true)
           .get();
-      return snapshot.docs.map((doc) => ProjectModel.fromJson(doc.data())).toList();
+      final projects = <ProjectModel>[];
+      for (final doc in snapshot.docs) {
+        try {
+          projects.add(ProjectModel.fromJson(doc.data()));
+        } catch (e) {
+          debugPrint('Skipping unparsable project ${doc.id}: $e');
+        }
+      }
+      return projects;
     } catch (_) {
       return [];
     }

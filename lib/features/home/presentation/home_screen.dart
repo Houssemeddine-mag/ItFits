@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -6,8 +5,15 @@ import 'package:flutter_animate/flutter_animate.dart';
 
 import 'package:itfits/core/services/providers.dart';
 import 'package:itfits/core/models/project_model.dart';
+import 'package:itfits/core/services/openrouter_service.dart';
 import 'package:itfits/core/services/project_stage.dart'
     show isProjectComplete, stageLabelFor;
+import 'package:itfits/core/widgets/project_thumbnail.dart';
+import 'package:itfits/core/router/safe_push.dart';
+import 'package:itfits/features/history/presentation/design_detail_screen.dart'
+    show projectDesignDocsProvider;
+import 'package:itfits/features/create/presentation/style_selection_screen.dart'
+    show designStyles, DesignStyle;
 
 final homeProjectsProvider = StreamProvider<List<ProjectModel>>((ref) {
   final uid = ref.watch(authStateProvider).asData?.value?.uid;
@@ -93,6 +99,9 @@ class HomeTabScreen extends ConsumerWidget {
     final colorScheme = theme.colorScheme;
     final textTheme = theme.textTheme;
     final projectsAsync = ref.watch(homeProjectsProvider);
+    // Triggers one-time load of the persisted OpenRouter key/models.
+    ref.watch(openRouterBootstrapProvider);
+    final aiReady = ref.watch(openRouterReadyProvider);
 
     return Scaffold(
       body: CustomScrollView(
@@ -135,9 +144,9 @@ class HomeTabScreen extends ConsumerWidget {
                       color: colorScheme.onSurfaceVariant,
                     ),
                   ).animate().fadeIn(delay: 100.ms, duration: 400.ms).slideX(begin: -0.2),
-                  const SizedBox(height: 24),
-                  const _CreateProjectCard(),
-                  const SizedBox(height: 24),
+                  const SizedBox(height: 12),
+                  if (!aiReady) const _AiKeyBanner(),
+                  if (!aiReady) const SizedBox(height: 8),
                   _SectionHeader(
                     title: 'Recent Projects',
                     actionLabel: 'View all',
@@ -164,79 +173,66 @@ class HomeTabScreen extends ConsumerWidget {
   }
 }
 
-class _CreateProjectCard extends StatelessWidget {
-  const _CreateProjectCard();
+/// Prompt to paste the OpenRouter key before creating with AI.
+/// Creation is 100% AI-driven, so without a key the user is routed to
+/// Profile → AI Setup instead of starting a half-working flow.
+class _AiKeyBanner extends ConsumerWidget {
+  const _AiKeyBanner();
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
-    final colorScheme = theme.colorScheme;
+    final cs = theme.colorScheme;
+    final chatModel = ref.watch(openRouterChatModelProvider);
 
     return Card(
-      elevation: 2,
-      child: InkWell(
-          onTap: () => context.push('/create'),
-        borderRadius: BorderRadius.circular(16),
-        child: Container(
-          padding: const EdgeInsets.all(20),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(16),
-            gradient: LinearGradient(
-              colors: [
-                colorScheme.primaryContainer,
-                colorScheme.primaryContainer.withValues(alpha: 0.5),
-              ],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
+      elevation: 0,
+      color: cs.primaryContainer.withValues(alpha: 0.45),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Row(
+          children: [
+            Container(
+              width: 48,
+              height: 48,
+              decoration: BoxDecoration(
+                color: cs.primary,
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: const Icon(Icons.key_rounded,
+                  color: Colors.white, size: 24),
             ),
-          ),
-          child: Row(
-            children: [
-              Container(
-                width: 60,
-                height: 60,
-                decoration: BoxDecoration(
-                  color: colorScheme.primary,
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Icon(
-                  Icons.camera_alt_outlined,
-                  color: colorScheme.onPrimary,
-                  size: 28,
-                ),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Start New Design',
-                      style: theme.textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w600,
-                        color: colorScheme.onSurface,
-                      ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Add your AI key to start creating',
+                      style: theme.textTheme.titleSmall
+                          ?.copyWith(fontWeight: FontWeight.w700)),
+                  const SizedBox(height: 2),
+                  Text(
+                    'Paste your free OpenRouter key in Profile → AI Setup (chat: $chatModel). Image models need credits.',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: cs.onSurfaceVariant,
                     ),
-                    const SizedBox(height: 4),
-                    Text(
-                      'Scan your room and let AI redesign it',
-                      style: theme.textTheme.bodyMedium?.copyWith(
-                        color: colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ],
-                ),
+                  ),
+                ],
               ),
-              Icon(
-                Icons.arrow_forward_ios,
-                color: colorScheme.onSurfaceVariant,
-                size: 20,
+            ),
+            const SizedBox(width: 8),
+            FilledButton(
+              onPressed: () => context.push('/profile'),
+              style: FilledButton.styleFrom(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 14, vertical: 10),
               ),
-            ],
-          ),
+              child: const Text('Add key'),
+            ),
+          ],
         ),
       ),
-    ).animate().fadeIn(delay: 200.ms, duration: 400.ms).slideY(begin: 0.2);
+    ).animate().fadeIn(delay: 150.ms, duration: 400.ms).slideY(begin: 0.15);
   }
 }
 
@@ -352,14 +348,10 @@ class _ProjectCardState extends State<_ProjectCard> {
   bool _navigating = false;
 
   Future<void> _openProject() async {
-    // Guard against double-taps pushing the same route twice, which
-    // crashes the Navigator with duplicate page keys (red screen).
     if (_navigating) return;
-    final id = widget.project.id;
-    if (GoRouterState.of(context).uri.toString() == '/design/$id') return;
     setState(() => _navigating = true);
     try {
-      await context.push('/design/$id');
+      await safePush(context, '/design/${widget.project.id}');
     } finally {
       if (mounted) setState(() => _navigating = false);
     }
@@ -371,7 +363,11 @@ class _ProjectCardState extends State<_ProjectCard> {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
     final hasDesigns = project.generatedDesigns != null && project.generatedDesigns!.isNotEmpty;
-    final thumbnailUrl = hasDesigns ? project.generatedDesigns!.last.panoramaUrl : null;
+    String? thumbnailUrl =
+        hasDesigns ? project.generatedDesigns!.last.panoramaUrl : null;
+    if (thumbnailUrl == null || thumbnailUrl.isEmpty) {
+      thumbnailUrl = project.panoramaUrl;
+    }
     final complete = isProjectComplete(project);
 
     return SizedBox(
@@ -388,12 +384,11 @@ class _ProjectCardState extends State<_ProjectCard> {
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
-                    thumbnailUrl != null && thumbnailUrl.isNotEmpty
-                        ? _displayImage(thumbnailUrl, colorScheme)
-                        : Container(
-                            color: colorScheme.primaryContainer,
-                            child: Icon(Icons.home_rounded, color: colorScheme.primary, size: 40),
-                          ),
+                    if (thumbnailUrl != null && thumbnailUrl.isNotEmpty)
+                      ProjectThumbnail(
+                          imageUrl: thumbnailUrl, placeholderIconSize: 40)
+                    else
+                      _HomeSubcollectionThumbnail(projectId: project.id),
                     Positioned(
                       top: 8,
                       left: 8,
@@ -532,29 +527,15 @@ class _StyleCarousel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final styles = [
-      ('Modern Minimalist', 'Clean lines, neutral palette', Icons.architecture_rounded, Color(0xFF8B6B5A)),
-      ('Scandinavian', 'Light woods, cozy textures', Icons.forest_rounded, Color(0xFF6B8E8E)),
-      ('Industrial', 'Raw materials, exposed elements', Icons.factory_rounded, Color(0xFF5E5042)),
-      ('Mid-Century', 'Organic shapes, warm tones', Icons.chair_rounded, Color(0xFFD4A574)),
-      ('Bohemian', 'Eclectic patterns, vibrant colors', Icons.palette_rounded, Color(0xFFB88A5A)),
-      ('Coastal', 'Breezy blues, natural fibers', Icons.waves_rounded, Color(0xFF4A7C8A)),
-    ];
-
     return SizedBox(
       height: 140,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
-        itemCount: styles.length,
+        itemCount: designStyles.length,
         separatorBuilder: (_, __) => const SizedBox(width: 12),
         itemBuilder: (context, index) {
-          final (name, desc, icon, color) = styles[index];
-          return _StyleCard(
-            name: name,
-            description: desc,
-            icon: icon,
-            color: color,
-          );
+          final style = designStyles[index];
+          return _StyleCard(style: style);
         },
       ),
     );
@@ -562,17 +543,9 @@ class _StyleCarousel extends StatelessWidget {
 }
 
 class _StyleCard extends StatelessWidget {
-  final String name;
-  final String description;
-  final IconData icon;
-  final Color color;
+  final DesignStyle style;
 
-  const _StyleCard({
-    required this.name,
-    required this.description,
-    required this.icon,
-    required this.color,
-  });
+  const _StyleCard({required this.style});
 
   @override
   Widget build(BuildContext context) {
@@ -584,13 +557,14 @@ class _StyleCard extends StatelessWidget {
       child: Card(
         clipBehavior: Clip.antiAlias,
         child: InkWell(
-          onTap: () => context.push('/create'),
+          // Info only — never starts a design directly.
+          onTap: () => _showStyleInfo(context, style),
           child: Container(
             decoration: BoxDecoration(
               gradient: LinearGradient(
                 colors: [
-                  color.withValues(alpha: 0.15),
-                  color.withValues(alpha: 0.05),
+                  style.color.withValues(alpha: 0.15),
+                  style.color.withValues(alpha: 0.05),
                 ],
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
@@ -604,14 +578,14 @@ class _StyleCard extends StatelessWidget {
                   width: 44,
                   height: 44,
                   decoration: BoxDecoration(
-                    color: color.withValues(alpha: 0.2),
+                    color: style.color.withValues(alpha: 0.2),
                     borderRadius: BorderRadius.circular(12),
                   ),
-                  child: Icon(icon, color: color, size: 22),
+                  child: Icon(style.icon, color: style.color, size: 22),
                 ),
                 const Spacer(),
                 Text(
-                  name,
+                  style.name,
                   style: theme.textTheme.titleSmall?.copyWith(
                     fontWeight: FontWeight.w600,
                   ),
@@ -620,7 +594,7 @@ class _StyleCard extends StatelessWidget {
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  description,
+                  style.description,
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: colorScheme.onSurfaceVariant,
                   ),
@@ -636,31 +610,331 @@ class _StyleCard extends StatelessWidget {
   }
 }
 
-Widget _displayImage(String imageUrl, ColorScheme colorScheme) {
-  if (imageUrl.startsWith('data:image')) {
-    try {
-      final bytes = base64Decode(imageUrl.split(',').last);
-      return Image.memory(bytes, fit: BoxFit.cover);
-    } catch (_) {
-      return Container(
-        color: colorScheme.primaryContainer,
-        child: Icon(Icons.broken_image_rounded, color: colorScheme.primary, size: 40),
-      );
-    }
-  }
-  return Image.network(
-    imageUrl,
-    fit: BoxFit.cover,
-    loadingBuilder: (context, child, progress) {
-      if (progress == null) return child;
-      return Container(
-        color: colorScheme.surfaceContainerHighest,
-        child: const Center(child: CircularProgressIndicator()),
+void _showStyleInfo(BuildContext context, DesignStyle style) {
+  final info = _styleIntel[style.id] ?? _StyleIntel.fallback(style.description);
+  showModalBottomSheet(
+    context: context,
+    isScrollControlled: true,
+    showDragHandle: true,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+    ),
+    builder: (ctx) {
+      final theme = Theme.of(ctx);
+      final cs = theme.colorScheme;
+      return SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 52,
+                    height: 52,
+                    decoration: BoxDecoration(
+                      color: style.color.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Icon(style.icon, color: style.color, size: 26),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(style.name,
+                            style: theme.textTheme.titleLarge
+                                ?.copyWith(fontWeight: FontWeight.w700)),
+                        Text(style.description,
+                            style: theme.textTheme.bodySmall?.copyWith(
+                                color: cs.onSurfaceVariant)),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              Text('What it is',
+                  style: theme.textTheme.titleSmall
+                      ?.copyWith(fontWeight: FontWeight.w600)),
+              const SizedBox(height: 6),
+              Text(info.about,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                      color: cs.onSurfaceVariant)),
+              const SizedBox(height: 14),
+              Text('Key characteristics',
+                  style: theme.textTheme.titleSmall
+                      ?.copyWith(fontWeight: FontWeight.w600)),
+              const SizedBox(height: 6),
+              ...info.traits.map((t) => Padding(
+                    padding: const EdgeInsets.only(bottom: 4),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Icon(Icons.check_circle_outline,
+                            size: 16, color: style.color),
+                        const SizedBox(width: 8),
+                        Expanded(child: Text(t,
+                            style: theme.textTheme.bodyMedium)),
+                      ],
+                    ),
+                  )),
+              const SizedBox(height: 14),
+              Text('Materials & palette',
+                  style: theme.textTheme.titleSmall
+                      ?.copyWith(fontWeight: FontWeight.w600)),
+              const SizedBox(height: 6),
+              Text(info.materials,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                      color: cs.onSurfaceVariant)),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: style.colorPalettes.map((p) {
+                  return Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 8),
+                    decoration: BoxDecoration(
+                      border: Border.all(color: cs.outlineVariant),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        ...p.colorList.map((c) => Container(
+                              width: 18,
+                              height: 18,
+                              margin: const EdgeInsets.only(right: 4),
+                              decoration: BoxDecoration(
+                                color: c,
+                                shape: BoxShape.circle,
+                                border: Border.all(
+                                    color: cs.outlineVariant, width: 0.5),
+                              ),
+                            )),
+                        const SizedBox(width: 4),
+                        Text(p.name,
+                            style: theme.textTheme.labelMedium?.copyWith(
+                                fontWeight: FontWeight.w600)),
+                      ],
+                    ),
+                  );
+                }).toList(),
+              ),
+              const SizedBox(height: 14),
+              Text('How it is presented in ItFits',
+                  style: theme.textTheme.titleSmall
+                      ?.copyWith(fontWeight: FontWeight.w600)),
+              const SizedBox(height: 6),
+              Text(info.presentation,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                      color: cs.onSurfaceVariant)),
+              const SizedBox(height: 6),
+              Text('Best for: ${info.bestFor}',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                      color: cs.onSurfaceVariant,
+                      fontStyle: FontStyle.italic)),
+              const SizedBox(height: 20),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () => Navigator.of(ctx).pop(),
+                      child: const Text('Close'),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: FilledButton.icon(
+                      onPressed: () {
+                        final ready = ProviderScope.containerOf(context)
+                            .read(openRouterReadyProvider);
+                        Navigator.of(ctx).pop();
+                        if (!ready) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text(
+                                  'Add your OpenRouter key in Profile → AI Setup first'),
+                            ),
+                          );
+                          context.push('/profile');
+                          return;
+                        }
+                        context.push('/create');
+                      },
+                      icon: const Icon(Icons.add_rounded, size: 18),
+                      label: const Text('Use this style'),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
       );
     },
-    errorBuilder: (_, __, ___) => Container(
-      color: colorScheme.primaryContainer,
-      child: Icon(Icons.broken_image_rounded, color: colorScheme.primary, size: 40),
-    ),
   );
+}
+
+class _StyleIntel {
+  final String about;
+  final List<String> traits;
+  final String materials;
+  final String bestFor;
+  final String presentation;
+
+  const _StyleIntel({
+    required this.about,
+    required this.traits,
+    required this.materials,
+    required this.bestFor,
+    required this.presentation,
+  });
+
+  factory _StyleIntel.fallback(String description) => _StyleIntel(
+        about: description,
+        traits: const ['Curated palette', 'Matched furniture', 'Balanced lighting'],
+        materials: 'See palettes below.',
+        bestFor: 'Any room',
+        presentation:
+            'Applied as wall/floor tints in 3D preview and as guidance for the AI redesign.',
+      );
+}
+
+const _styleIntel = <String, _StyleIntel>{
+  'modern': _StyleIntel(
+    about:
+        'Modern is about clarity: open space, straight lines and a calm neutral base with almost no ornament.',
+    traits: [
+      'Low-profile furniture with clean geometric lines',
+      'Neutral base (white, beige, grey) + one restrained accent',
+      'Uncluttered surfaces, hidden storage, simple lighting',
+    ],
+    materials: 'Polished concrete, glass, matte metal, light oak, boucle or leather accents.',
+    bestFor: 'Living rooms, home offices, small apartments that need visual calm.',
+    presentation:
+        'In ItFits the Modern palettes tint the 3D floor/walls and steer the AI toward minimal furniture and monochrome or warm-neutral schemes.',
+  ),
+  'scandinavian': _StyleIntel(
+    about:
+        'Scandinavian blends minimalism with coziness (hygge): bright, functional rooms in pale woods and soft textiles.',
+    traits: [
+      'White walls, pale wood floors, light textiles',
+      'Functional furniture, rounded soft shapes',
+      'Layered lighting: daylight + warm lamps and candles',
+    ],
+    materials: 'Birch and ash wood, wool, linen, sheepskin, muted greens and warm beiges.',
+    bestFor: 'Bedrooms, living rooms and dark rooms that need more light.',
+    presentation:
+        'Scandi palettes keep the 3D preview light and airy; the AI prioritizes light woods, cozy textures and uncluttered layouts.',
+  ),
+  'industrial': _StyleIntel(
+    about:
+        'Industrial borrows from old factories: raw structure, dark metals and honest, unfinished surfaces.',
+    traits: [
+      'Exposed brick, concrete and visible pipes or beams',
+      'Black steel frames, leather, reclaimed wood',
+      'High contrast, moody lighting with metal shades',
+    ],
+    materials: 'Raw concrete, black metal, distressed leather, dark walnut, Edison bulbs.',
+    bestFor: 'Lofts, kitchens, dining areas with character.',
+    presentation:
+        'Industrial palettes darken the 3D walls/floor slightly; the AI leans into raw textures, dark frames and urban edge furniture.',
+  ),
+  'midcentury': _StyleIntel(
+    about:
+        'Mid-Century (1950s–60s) mixes organic curves with tapered legs and warm, optimistic color.',
+    traits: [
+      'Iconic shapes: lounge chairs, tapered wooden legs',
+      'Warm tones: mustard, olive, teak, walnut',
+      'Mix of straight lines and gentle organic curves',
+    ],
+    materials: 'Teak and walnut, tweed and velvet upholstery, brass details.',
+    bestFor: 'Living rooms and dining rooms with a timeless retro feel.',
+    presentation:
+        'Mid-Century palettes warm up the 3D preview; the AI suggests classic silhouettes in teak, mustard and olive combinations.',
+  ),
+  'bohemian': _StyleIntel(
+    about:
+        'Bohemian is relaxed and eclectic: layered patterns, global accents and rich color collected over time.',
+    traits: [
+      'Layered rugs, cushions and throws in mixed patterns',
+      'Plants, rattan, handmade and vintage pieces',
+      'Jewel or earth tones, no strict symmetry',
+    ],
+    materials: 'Rattan, jute, velvet, kilim patterns, brass and lots of greenery.',
+    bestFor: 'Bedrooms, creative studios, rentals that want personality.',
+    presentation:
+        'Boho palettes add saturated accents to the 3D preview; the AI layers patterns, textures and vibrant or earthy combinations.',
+  ),
+  'coastal': _StyleIntel(
+    about:
+        'Coastal is breezy and relaxed: light blues, sand tones and natural fibers that feel like the seaside.',
+    traits: [
+      'White + soft blue palette with sandy neutrals',
+      'Linen slipcovers, light woods, woven textures',
+      'Lots of natural light, sheer curtains, open feel',
+    ],
+    materials: 'Washed oak, linen, jute and rattan, sea-glass blues.',
+    bestFor: 'Living rooms, bathrooms and bedrooms that should feel fresh.',
+    presentation:
+        'Coastal palettes cool the 3D preview with blues and sand; the AI keeps furniture light, natural and relaxed-elegant.',
+  ),
+  'japandi': _StyleIntel(
+    about:
+        'Japandi fuses Japanese minimalism with Scandinavian warmth: calm, low furniture and natural balance.',
+    traits: [
+      'Low, simple furniture with clean joinery',
+      'Warm neutrals with soft black contrast',
+      'Negative space, natural light, quiet textures',
+    ],
+    materials: 'Light oak and bamboo, paper lamps, stone, oatmeal linen, matte black accents.',
+    bestFor: 'Bedrooms, living rooms and calm work-from-home spaces.',
+    presentation:
+        'Japandi palettes mute the 3D preview to zen neutrals; the AI favors low minimal furniture with warm-wood balance.',
+  ),
+  'classic': _StyleIntel(
+    about:
+        'Classic is timeless and symmetrical: refined proportions, elegant details and enduring color.',
+    traits: [
+      'Symmetrical layouts around a focal point',
+      'Panelled walls or mouldings, tailored upholstery',
+      'Cream, navy or sage with gold or wood accents',
+    ],
+    materials: 'Polished wood, marble, brass, velvet and crisp cotton.',
+    bestFor: 'Dining rooms, formal living rooms, entryways.',
+    presentation:
+        'Classic palettes give the 3D preview a refined cream/navy/sage base; the AI composes symmetrical, elegant furniture arrangements.',
+  ),
+};
+
+/// Old projects (generated before thumbnails were published to the project
+/// doc) only have full images in the `designs` subcollection.
+class _HomeSubcollectionThumbnail extends ConsumerWidget {
+  final String projectId;
+  const _HomeSubcollectionThumbnail({required this.projectId});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final docsAsync = ref.watch(projectDesignDocsProvider(projectId));
+    return docsAsync.when(
+      data: (docs) => ProjectThumbnail(
+          imageUrl: docs.isEmpty ? null : docs.first.imageUrl,
+          placeholderIconSize: 40),
+      loading: () => Container(
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        child: const Center(
+            child: SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2))),
+      ),
+      error: (_, __) =>
+          const ProjectThumbnail(imageUrl: null, placeholderIconSize: 40),
+    );
+  }
 }

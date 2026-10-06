@@ -1,8 +1,36 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:freezed_annotation/freezed_annotation.dart';
 import 'package:flutter/foundation.dart';
 
 part 'project_model.freezed.dart';
 part 'project_model.g.dart';
+
+/// Firestore stores dates as [Timestamp] when written with
+/// `FieldValue.serverTimestamp()`, but new docs are written as ISO strings.
+/// Accept String / Timestamp / DateTime / epoch millis so old + new +
+/// offline docs all parse instead of throwing (which blanked History/Home).
+DateTime? _dateTimeFromJson(Object? value) {
+  if (value == null) return null;
+  if (value is DateTime) return value;
+  if (value is String) {
+    if (value.isEmpty) return null;
+    return DateTime.tryParse(value);
+  }
+  if (value is Timestamp) return value.toDate();
+  if (value is num) {
+    final ms = value.toInt();
+    // Heuristic: seconds (<1e11) vs millis.
+    return DateTime.fromMillisecondsSinceEpoch(ms < 100000000000 ? ms * 1000 : ms);
+  }
+  try {
+    final dynamic dyn = value;
+    final DateTime? viaToDate = (dyn.toDate() as DateTime?);
+    if (viaToDate != null) return viaToDate;
+  } catch (_) {}
+  return null;
+}
+
+String? _dateTimeToJson(DateTime? value) => value?.toIso8601String();
 
 @freezed
 class Point with _$Point {
@@ -32,7 +60,9 @@ class ProjectModel with _$ProjectModel {
     FloorPlanModel? floorPlan,
     List<GeneratedDesignModel>? generatedDesigns,
     @Default(ProjectStatus.scanning) ProjectStatus status,
+    @JsonKey(fromJson: _dateTimeFromJson, toJson: _dateTimeToJson)
     DateTime? createdAt,
+    @JsonKey(fromJson: _dateTimeFromJson, toJson: _dateTimeToJson)
     DateTime? updatedAt,
   }) = _ProjectModel;
 
@@ -116,6 +146,7 @@ class GeneratedDesignModel with _$GeneratedDesignModel {
     required int backgroundColor,
     required int surfaceColor,
     String? prompt,
+    @JsonKey(fromJson: _dateTimeFromJson, toJson: _dateTimeToJson)
     DateTime? createdAt,
   }) = _GeneratedDesignModel;
 

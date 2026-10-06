@@ -43,6 +43,10 @@ app.*.map.json
 functions/node_modules/
 functions/lib/
 
+# Shared AI key (bundled at build time) — never commit the real key.
+.env
+!.env.example
+
 # Android Studio will place build artifacts here
 /android/app/debug
 /android/app/profile

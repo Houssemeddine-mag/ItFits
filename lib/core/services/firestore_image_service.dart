@@ -39,6 +39,35 @@ Future<String> fitDataUrlForFirestore(String url) async {
   return 'data:image/jpeg;base64,${base64Encode(fitted)}';
 }
 
+/// Small card thumbnail (~480px wide, quality 70, typically 30-60KB).
+/// Stored inline on the project doc (`panoramaUrl` + `generatedDesigns`)
+/// so History/Home cards render instantly without reading subcollections
+/// or decoding multi-MB data URLs on the UI thread.
+/// The full fitted image stays in the `designs` subcollection.
+Future<String> fitDataUrlThumbnail(String url, {int maxWidth = 480}) async {
+  if (!url.startsWith('data:image')) return url;
+  try {
+    final comma = url.indexOf(',');
+    if (comma < 0) return url;
+    final bytes = base64Decode(url.substring(comma + 1));
+    if (bytes.length <= 60 * 1024) return url;
+    final thumb = await Isolate.run(() {
+      final decoded = img.decodeImage(bytes);
+      if (decoded == null) return null;
+      final scale = maxWidth / decoded.width;
+      final resized = scale < 1
+          ? img.copyResize(decoded,
+              width: maxWidth, interpolation: img.Interpolation.average)
+          : decoded;
+      return Uint8List.fromList(img.encodeJpg(resized, quality: 70));
+    });
+    if (thumb == null || thumb.isEmpty) return url;
+    return 'data:image/jpeg;base64,${base64Encode(thumb)}';
+  } catch (_) {
+    return url;
+  }
+}
+
 class CapturedImageData {
   final String id;
   final String base64Data;
@@ -61,10 +90,10 @@ class CapturedImageData {
 
   factory CapturedImageData.fromMap(Map<String, dynamic> map) =>
       CapturedImageData(
-        id: map['id'] as String,
-        base64Data: map['base64Data'] as String,
-        order: map['order'] as int,
-        createdAt: DateTime.parse(map['createdAt'] as String),
+        id: map['id'] as String? ?? '',
+        base64Data: map['base64Data'] as String? ?? '',
+        order: (map['order'] as num?)?.toInt() ?? 0,
+        createdAt: _parseDate(map['createdAt']) ?? DateTime.now(),
       );
 }
 
@@ -93,12 +122,33 @@ class GeneratedDesignData {
 
   factory GeneratedDesignData.fromMap(Map<String, dynamic> map) =>
       GeneratedDesignData(
-        id: map['id'] as String,
-        imageUrl: map['imageUrl'] as String,
+        id: map['id'] as String? ?? '',
+        imageUrl: map['imageUrl'] as String? ?? '',
         style: map['style'] as String? ?? '',
         prompt: map['prompt'] as String? ?? '',
-        createdAt: DateTime.parse(map['createdAt'] as String),
+        createdAt: _parseDate(map['createdAt']) ?? DateTime.now(),
       );
+}
+
+/// Accepts ISO strings (current), Firestore Timestamps (serverTimestamp
+/// writes), DateTime and epoch millis — never throws.
+DateTime? _parseDate(Object? value) {
+  if (value == null) return null;
+  if (value is DateTime) return value;
+  if (value is String) {
+    if (value.isEmpty) return null;
+    return DateTime.tryParse(value);
+  }
+  if (value is num) {
+    final ms = value.toInt();
+    return DateTime.fromMillisecondsSinceEpoch(ms < 100000000000 ? ms * 1000 : ms);
+  }
+  try {
+    final dynamic dyn = value;
+    return dyn.toDate() as DateTime?;
+  } catch (_) {
+    return null;
+  }
 }
 
 class FirestoreImageService {

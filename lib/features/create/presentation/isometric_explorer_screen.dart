@@ -20,18 +20,12 @@ class _IsometricExplorerScreenState extends ConsumerState<IsometricExplorerScree
   double _rotationY = 0.785;
   double _rotationX = 0.523;
   double _zoom = 1.0;
-  double _baseZoom = 1.0;
   double _offsetX = 0.0;
   double _offsetY = 0.0;
   bool _showGrid = true;
   bool _showLabels = true;
-<<<<<<< HEAD
   Offset? _lastFocal;
   double _zoomAtStart = 1.0;
-=======
-  Offset? _lastFocalPoint;
-  bool _isRotating = false;
->>>>>>> c34caadaa955844d60d1c9833eca9f9da2971229
 
   static const double _minZoom = 0.2;
   static const double _maxZoom = 4.0;
@@ -72,26 +66,10 @@ class _IsometricExplorerScreenState extends ConsumerState<IsometricExplorerScree
               child: Stack(
                 children: [
                   GestureDetector(
-<<<<<<< HEAD
                     behavior: HitTestBehavior.opaque,
                     onScaleStart: _handleScaleStart,
                     onScaleUpdate: _handleScaleUpdate,
                     onScaleEnd: (_) => _lastFocal = null,
-=======
-                    // Note: scale is a superset of pan — a single-finger drag
-                    // arrives as onScaleUpdate with pointerCount == 1, so no
-                    // separate onPan handlers (they would fight the scale
-                    // recognizer and Flutter logs the redundancy).
-                    onLongPressStart: _handleLongPressStart,
-                    onLongPressMoveUpdate: _handleLongPressMove,
-                    onLongPressEnd: (_) {
-                      _lastFocalPoint = null;
-                      _isRotating = false;
-                    },
-                    onScaleStart: _handleScaleStart,
-                    onScaleUpdate: _handleScaleUpdate,
-                    onScaleEnd: (_) => _lastFocalPoint = null,
->>>>>>> c34caadaa955844d60d1c9833eca9f9da2971229
                     child: LayoutBuilder(
                       builder: (context, constraints) {
                         return CustomPaint(
@@ -126,7 +104,6 @@ class _IsometricExplorerScreenState extends ConsumerState<IsometricExplorerScree
     );
   }
 
-<<<<<<< HEAD
   void _handleScaleStart(ScaleStartDetails details) {
     _lastFocal = details.focalPoint;
     _zoomAtStart = _zoom;
@@ -147,51 +124,6 @@ class _IsometricExplorerScreenState extends ConsumerState<IsometricExplorerScree
         _offsetY += delta.dy;
       }
     });
-=======
-  void _handleLongPressStart(LongPressStartDetails details) {
-    _isRotating = true;
-    _lastFocalPoint = details.localPosition;
-  }
-
-  void _handleLongPressMove(LongPressMoveUpdateDetails details) {
-    if (_lastFocalPoint != null) {
-      final dx = details.localPosition.dx - _lastFocalPoint!.dx;
-      final dy = details.localPosition.dy - _lastFocalPoint!.dy;
-      setState(() {
-        _rotationY += dx * 0.005;
-        _rotationX = (_rotationX - dy * 0.005).clamp(0.1, 1.2);
-      });
-    }
-    _lastFocalPoint = details.localPosition;
-  }
-
-  void _handleScaleStart(ScaleStartDetails details) {
-    // Long-press rotate wins while held; ignore scale panning meanwhile.
-    if (_isRotating) return;
-    _lastFocalPoint = details.focalPoint;
-    _baseZoom = _zoom;
-  }
-
-  void _handleScaleUpdate(ScaleUpdateDetails details) {
-    if (_isRotating) return;
-    if (details.pointerCount == 1) {
-      // Single-finger drag = pan.
-      if (_lastFocalPoint != null) {
-        final dx = details.focalPoint.dx - _lastFocalPoint!.dx;
-        final dy = details.focalPoint.dy - _lastFocalPoint!.dy;
-        setState(() {
-          _offsetX += dx;
-          _offsetY += dy;
-        });
-      }
-    } else {
-      // Two+ fingers = pinch zoom, anchored to zoom at gesture start.
-      setState(() {
-        _zoom = (_baseZoom * details.scale).clamp(_minZoom, _maxZoom);
-      });
-    }
-    _lastFocalPoint = details.focalPoint;
->>>>>>> c34caadaa955844d60d1c9833eca9f9da2971229
   }
 
   void _zoomIn() {

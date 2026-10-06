@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
@@ -9,6 +8,10 @@ import 'package:itfits/core/services/providers.dart';
 import 'package:itfits/core/models/project_model.dart';
 import 'package:itfits/core/services/project_stage.dart'
     show isProjectComplete, stageLabelFor;
+import 'package:itfits/core/widgets/project_thumbnail.dart';
+import 'package:itfits/core/router/safe_push.dart';
+import 'package:itfits/features/history/presentation/design_detail_screen.dart'
+    show projectDesignDocsProvider;
 
 /// Normalizes room-type strings so 'Living Room', 'living_room' and
 /// filter names like 'livingRoom' compare equal.
@@ -166,11 +169,7 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
             title: const Text('Open Project'),
             onTap: () {
               Navigator.pop(context);
-              if (GoRouterState.of(context).uri.toString() ==
-                  '/design/${project.id}') {
-                return;
-              }
-              context.push('/design/${project.id}');
+              safePush(context, '/design/${project.id}');
             },
           ),
           ListTile(
@@ -357,14 +356,10 @@ class _HistoryProjectCardState extends State<_HistoryProjectCard> {
   bool _navigating = false;
 
   Future<void> _openProject() async {
-    // Guard against double-taps pushing the same route twice, which
-    // crashes the Navigator with duplicate page keys (red screen).
     if (_navigating) return;
-    final id = widget.project.id;
-    if (GoRouterState.of(context).uri.toString() == '/design/$id') return;
     setState(() => _navigating = true);
     try {
-      await context.push('/design/$id');
+      await safePush(context, '/design/${widget.project.id}');
     } finally {
       if (mounted) setState(() => _navigating = false);
     }
@@ -376,7 +371,13 @@ class _HistoryProjectCardState extends State<_HistoryProjectCard> {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
     final hasDesigns = project.generatedDesigns != null && project.generatedDesigns!.isNotEmpty;
-    final thumbnailUrl = hasDesigns ? project.generatedDesigns!.last.panoramaUrl : null;
+    // Inline thumbnail (new) → top-level panoramaUrl → subcollection docs
+    // (old projects generated before thumbnails were published).
+    String? thumbnailUrl =
+        hasDesigns ? project.generatedDesigns!.last.panoramaUrl : null;
+    if (thumbnailUrl == null || thumbnailUrl.isEmpty) {
+      thumbnailUrl = project.panoramaUrl;
+    }
     final designCount = hasDesigns ? project.generatedDesigns!.length : 0;
     final roomTypeDisplay = project.roomType.replaceAll('_', ' ');
     final roomLabel = roomTypeDisplay.isNotEmpty
@@ -397,12 +398,10 @@ class _HistoryProjectCardState extends State<_HistoryProjectCard> {
               child: Stack(
                 fit: StackFit.expand,
                 children: [
-                  thumbnailUrl != null && thumbnailUrl.isNotEmpty
-                      ? _buildProjectImage(thumbnailUrl, colorScheme)
-                      : Container(
-                          color: colorScheme.primaryContainer,
-                          child: Icon(Icons.home_rounded, color: colorScheme.primary, size: 48),
-                        ),
+                  if (thumbnailUrl != null && thumbnailUrl.isNotEmpty)
+                    ProjectThumbnail(imageUrl: thumbnailUrl)
+                  else
+                    _SubcollectionThumbnail(projectId: project.id),
                   Positioned(
                     top: 8,
                     right: 8,
@@ -605,31 +604,32 @@ class _EmptyHistoryState extends StatelessWidget {
   }
 }
 
-Widget _buildProjectImage(String imageUrl, ColorScheme colorScheme) {
-  if (imageUrl.startsWith('data:image')) {
-    try {
-      final bytes = base64Decode(imageUrl.split(',').last);
-      return Image.memory(bytes, fit: BoxFit.cover);
-    } catch (_) {
-      return Container(
-        color: colorScheme.surfaceContainerHighest,
-        child: const Icon(Icons.image_not_supported_rounded, size: 48),
-      );
-    }
+/// Old projects (generated before thumbnails were published to the project
+/// doc) only have full images in the `designs` subcollection — show the
+/// latest one instead of a placeholder.
+class _SubcollectionThumbnail extends ConsumerWidget {
+  final String projectId;
+  const _SubcollectionThumbnail({required this.projectId});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final docsAsync = ref.watch(projectDesignDocsProvider(projectId));
+    return docsAsync.when(
+      data: (docs) {
+        if (docs.isEmpty) {
+          return const ProjectThumbnail(imageUrl: null);
+        }
+        return ProjectThumbnail(imageUrl: docs.first.imageUrl);
+      },
+      loading: () => Container(
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        child: const Center(
+            child: SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2))),
+      ),
+      error: (_, __) => const ProjectThumbnail(imageUrl: null),
+    );
   }
-  return Image.network(
-    imageUrl,
-    fit: BoxFit.cover,
-    loadingBuilder: (context, child, progress) {
-      if (progress == null) return child;
-      return Container(
-        color: colorScheme.surfaceContainerHighest,
-        child: const Center(child: CircularProgressIndicator()),
-      );
-    },
-    errorBuilder: (_, __, ___) => Container(
-      color: colorScheme.surfaceContainerHighest,
-      child: const Icon(Icons.image_not_supported_rounded, size: 48),
-    ),
-  );
 }

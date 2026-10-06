@@ -6,6 +6,9 @@ import 'package:flutter_animate/flutter_animate.dart';
 
 import 'package:itfits/core/models/floor_plan_data.dart';
 import 'package:itfits/core/services/ai_proxy_service.dart';
+import 'package:itfits/core/services/firestore_image_service.dart'
+    show fitDataUrlForFirestore;
+import 'package:itfits/core/services/openrouter_service.dart';
 import 'package:itfits/core/services/providers.dart';
 
 class ChatMessage {
@@ -105,14 +108,46 @@ class _AiChatScreenState extends ConsumerState<AiChatScreen> {
       final roomType = ref.read(currentProjectProvider)?.roomType ?? 'Room';
       final palette = ref.read(selectedPaletteProvider2);
       final proxy = ref.read(aiProxyServiceProvider);
+      final openRouter = ref.read(openRouterServiceProvider);
+
+      // Multimodal context: 2D/3D floor plan + captured room photo.
+      // The shared `.env` key (or user override) drives a vision-capable LLM,
+      // so chat can recommend designs grounded in what the room looks like
+      // and how the 2D plan / 3D preview is laid out.
+      final captured = ref.read(capturedImagesProvider);
+      String? photoDataUrl;
+      if (captured.isNotEmpty) {
+        final raw = captured.first;
+        final prefixed = raw.startsWith('data:')
+            ? raw
+            : 'data:image/jpeg;base64,$raw';
+        try {
+          photoDataUrl = await fitDataUrlForFirestore(prefixed);
+        } catch (_) {
+          photoDataUrl = prefixed;
+        }
+      }
+
+      final planBlock = floorPlan != null
+          ? 'Room: ${floorPlan.roomWidth.toStringAsFixed(1)}m × '
+              '${floorPlan.roomDepth.toStringAsFixed(1)}m '
+              '(${floorPlan.area.toStringAsFixed(1)} m²), '
+              'ceiling ${floorPlan.ceilingHeight.toStringAsFixed(1)}m, '
+              '${floorPlan.walls.length} wall(s), '
+              '${floorPlan.windows.length} window(s), '
+              '${floorPlan.doors.length} door(s), '
+              '${floorPlan.outlets.length} outlet(s). '
+              '2D plan + 3D isometric preview share this exact geometry '
+              '(the 360 redesign must respect these walls/openings). '
+              '${floorPlan.toPromptDescription()}'
+          : 'No measured floor plan yet — advise generally and ask for dimensions/photo.';
 
       final systemPrompt = 'You are an expert interior design agent with full access to the user\'s project. '
-          'You can see their room type ($roomType), floor plan, style choice, and color palette. '
+          'You can see their room type ($roomType), 2D floor plan, 3D geometry, style choice, color palette, '
+          'and (when attached) the actual room photo. '
           '${styleName.isNotEmpty ? "Chosen style: $styleName. " : ""}'
           '${palette.isNotEmpty ? "Color palette includes ${palette.length} colors. " : ""}'
-          '${floorPlan != null ? "Room: ${floorPlan.roomWidth.toStringAsFixed(1)}m × ${floorPlan.roomDepth.toStringAsFixed(1)}m, "
-              "${floorPlan.windows.length} window(s), ${floorPlan.doors.length} door(s). "
-              "${floorPlan.toPromptDescription()}" : ""}'
+          '$planBlock'
           '\nYour capabilities:\n'
           '- Advise on furniture placement with specific positions and dimensions\n'
           '- Recommend color palettes and material combinations\n'
@@ -120,29 +155,60 @@ class _AiChatScreenState extends ConsumerState<AiChatScreen> {
           '- Optimize space usage and traffic flow\n'
           '- Provide step-by-step redesign instructions\n'
           '- Recommend specific furniture pieces and decor items\n'
+          '- Recommend a 360 redesign direction consistent with the photo + plan\n'
           '\nRules:\n'
           '- Always reference specific walls, dimensions, and positions from the floor plan\n'
+          '- When a photo is attached, ground advice in visible cues (light, clutter, surfaces)\n'
           '- Give actionable advice the user can immediately apply\n'
           '- Be concise but thorough — use bullet points\n'
           '- When suggesting furniture, mention approximate dimensions that fit the space\n'
           '- Consider natural light from windows and traffic from doors\n';
 
-      if (!proxy.isAvailable) {
-        throw const AiProxyException('AI backend unavailable');
-      }
-
       final messages = <Map<String, Object>>[
         {'role': 'system', 'content': systemPrompt},
       ];
       final chatHistory = ref.read(chatMessagesProvider);
-      for (final msg in chatHistory.skip(max(0, chatHistory.length - 20))) {
-        messages.add({
-          'role': msg.isUser ? 'user' : 'assistant',
-          'content': msg.text,
-        });
+      // Older turns stay text-only; the latest user turn carries the photo
+      // so the vision model sees visual + plan context together.
+      final history = chatHistory.skip(max(0, chatHistory.length - 20)).toList();
+      for (var i = 0; i < history.length; i++) {
+        final msg = history[i];
+        final isLatestUser =
+            msg.isUser && i == history.lastIndexWhere((m) => m.isUser);
+        if (isLatestUser && photoDataUrl != null) {
+          messages.add({
+            'role': 'user',
+            'content': [
+              {'type': 'text', 'text': msg.text},
+              {
+                'type': 'image_url',
+                'image_url': {'url': photoDataUrl},
+              },
+            ],
+          });
+        } else {
+          messages.add({
+            'role': msg.isUser ? 'user' : 'assistant',
+            'content': msg.text,
+          });
+        }
       }
 
-      final reply = await proxy.chat(messages);
+      // User's OpenRouter key first (100% AI flow), server backend as backup.
+      String reply;
+      if (openRouter.isReady) {
+        try {
+          reply = await openRouter.chat(messages);
+        } catch (_) {
+          if (!proxy.isAvailable) rethrow;
+          reply = await proxy.chat(messages);
+        }
+      } else {
+        if (!proxy.isAvailable) {
+          throw const AiProxyException('AI backend unavailable');
+        }
+        reply = await proxy.chat(messages);
+      }
 
       ref.read(chatMessagesProvider.notifier).state = [
         ...ref.read(chatMessagesProvider),

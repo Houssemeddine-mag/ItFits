@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:itfits/core/services/ai_proxy_service.dart';
+import 'package:itfits/core/services/openrouter_service.dart';
 import 'package:itfits/core/services/firestore_image_service.dart' show fitDataUrlForFirestore;
 
 import 'package:itfits/core/models/floor_plan_data.dart';
@@ -559,11 +560,14 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
     final images = ref.read(capturedImagesProvider);
     if (images.isEmpty) return;
     final proxy = ref.read(aiProxyServiceProvider);
-    if (!proxy.isAvailable) {
+    final openRouter = ref.read(openRouterServiceProvider);
+    if (!openRouter.isReady && !proxy.isAvailable) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Sign in to use AI auto-detect'),
+            content: Text(
+                'No AI key configured. Paste OPENROUTER_API_KEY into .env '
+                'or add your own in Profile → AI Setup.'),
             backgroundColor: Colors.orange,
           ),
         );
@@ -574,15 +578,23 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
     try {
       final imageData = images.first;
       final dataUrl = await fitDataUrlForFirestore(imageData.startsWith('data:') ? imageData : 'data:image/jpeg;base64,$imageData');
-      final content = await proxy.chat([
-        {
-          'role': 'user',
-          'content': [
-            {'type': 'text', 'text': _detectionPrompt()},
-            {'type': 'image_url', 'image_url': {'url': dataUrl}},
-          ],
-        },
-      ]);
+      final visionMessage = {
+        'role': 'user',
+        'content': [
+          {'type': 'text', 'text': _detectionPrompt()},
+          {'type': 'image_url', 'image_url': {'url': dataUrl}},
+        ],
+      };
+      String content;
+      if (openRouter.isReady) {
+        try {
+          content = await openRouter.chat([visionMessage]);
+        } catch (_) {
+          content = await proxy.chat([visionMessage]);
+        }
+      } else {
+        content = await proxy.chat([visionMessage]);
+      }
       _parseDetection(content);
     } catch (e) {
       if (mounted) {
@@ -715,22 +727,12 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
             final w = double.tryParse(wc.text);
             final d = double.tryParse(dc.text);
             final h = double.tryParse(hc.text);
-<<<<<<< HEAD
-            if (w != null && d != null && w > 0 && d > 0) {
-              setState(() {
-                _cancelPendingWall();
-                _plan.resizeTo(w, d);
-                if (h != null && h > 0) _plan.ceilingHeight = h;
-              });
-              _save();
-=======
             if (w == null || d == null || w <= 0 || d <= 0) {
               ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
                 content: Text('Enter valid width and depth greater than 0'),
                 duration: Duration(seconds: 2),
               ));
               return;
->>>>>>> c34caadaa955844d60d1c9833eca9f9da2971229
             }
             if (hc.text.trim().isNotEmpty && (h == null || h <= 0)) {
               ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
@@ -740,10 +742,12 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
               return;
             }
             setState(() {
-              _plan.roomWidth = w.clamp(1.0, 50.0);
-              _plan.roomDepth = d.clamp(1.0, 50.0);
+              _cancelPendingWall();
+              _plan.resizeTo(
+                w.clamp(1.0, 50.0),
+                d.clamp(1.0, 50.0),
+              );
               if (h != null && h > 0) _plan.ceilingHeight = h.clamp(2.0, 6.0);
-              _rebuildWalls();
             });
             _save();
             Navigator.pop(ctx);
@@ -821,22 +825,6 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
 
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
-<<<<<<< HEAD
-              child: Row(
-                children: [
-                  _chip('Door', Icons.door_sliding_outlined, _mode == _Mode.door, cs, () => _toggleMode(_Mode.door)),
-                  const SizedBox(width: 4),
-                  _chip('Window', Icons.curtains_outlined, _mode == _Mode.window, cs, () => _toggleMode(_Mode.window)),
-                  const SizedBox(width: 4),
-                  _chip('Outlet', Icons.electrical_services_outlined, _mode == _Mode.outlet, cs, () => _toggleMode(_Mode.outlet)),
-                  const SizedBox(width: 4),
-                  _chip('Split', Icons.content_cut, _mode == _Mode.split, cs, () => _toggleMode(_Mode.split)),
-                  const SizedBox(width: 4),
-                  _chip('Wall', Icons.add_home_outlined, _mode == _Mode.addWall, cs, () => _toggleMode(_Mode.addWall)),
-                  const SizedBox(width: 4),
-                  _chip('Delete', Icons.delete_sweep_outlined, _mode == _Mode.deleteWall, cs, () => _toggleMode(_Mode.deleteWall), color: cs.error),
-                ],
-=======
               child: SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
                 child: Row(
@@ -857,7 +845,6 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
                     _chip('Delete', Icons.delete_sweep_outlined, _mode == _Mode.deleteWall, cs, () => _toggleMode(_Mode.deleteWall), color: cs.error),
                   ],
                 ),
->>>>>>> c34caadaa955844d60d1c9833eca9f9da2971229
               ),
             ),
 
@@ -1120,28 +1107,13 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
         Expanded(child: Text('Outlet · ${_wallName(o.wallIndex)}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600))),
         IconButton(onPressed: () => _deleteElement('outlet', _selectedIdx!), icon: Icon(Icons.delete_outline, size: 18, color: cs.error), visualDensity: VisualDensity.compact, padding: EdgeInsets.zero, constraints: const BoxConstraints()),
       ]),
-<<<<<<< HEAD
       _slider('Position', '${(o.positionAlongWall * 100).round()}%', o.positionAlongWall, _posLo(o.wallIndex, 0.1), _posHi(o.wallIndex, 0.1), (v) => _updateOutlet(_selectedIdx!, pos: v)),
-      Row(children: [
-        const Text('Type: ', style: TextStyle(fontSize: 10)),
-        ...OutletType.values.map((t) => Padding(
-          padding: const EdgeInsets.only(right: 3),
-          child: ChoiceChip(
-            label: Text(t.name, style: const TextStyle(fontSize: 9)),
-            selected: o.type == t,
-            onSelected: (_) => _updateOutlet(_selectedIdx!, type: t),
-            visualDensity: VisualDensity.compact,
-            padding: const EdgeInsets.symmetric(horizontal: 4),
-            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-=======
-      _slider('Position', '${(o.positionAlongWall * 100).round()}%', o.positionAlongWall, 0.05, 0.95, (v) => _updateOutlet(_selectedIdx!, pos: v)),
       Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Padding(
             padding: EdgeInsets.only(top: 8),
             child: Text('Type: ', style: TextStyle(fontSize: 10)),
->>>>>>> c34caadaa955844d60d1c9833eca9f9da2971229
           ),
           Expanded(
             child: Wrap(

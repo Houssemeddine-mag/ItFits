@@ -41,12 +41,8 @@ _$ProjectModelImpl _$$ProjectModelImplFromJson(Map<String, dynamic> json) =>
           .toList(),
       status: $enumDecodeNullable(_$ProjectStatusEnumMap, json['status']) ??
           ProjectStatus.scanning,
-      createdAt: json['createdAt'] == null
-          ? null
-          : DateTime.parse(json['createdAt'] as String),
-      updatedAt: json['updatedAt'] == null
-          ? null
-          : DateTime.parse(json['updatedAt'] as String),
+      createdAt: _dateTimeFromJson(json['createdAt']),
+      updatedAt: _dateTimeFromJson(json['updatedAt']),
     );
 
 Map<String, dynamic> _$$ProjectModelImplToJson(_$ProjectModelImpl instance) =>
@@ -66,8 +62,8 @@ Map<String, dynamic> _$$ProjectModelImplToJson(_$ProjectModelImpl instance) =>
       'floorPlan': instance.floorPlan,
       'generatedDesigns': instance.generatedDesigns,
       'status': _$ProjectStatusEnumMap[instance.status]!,
-      'createdAt': instance.createdAt?.toIso8601String(),
-      'updatedAt': instance.updatedAt?.toIso8601String(),
+      'createdAt': _dateTimeToJson(instance.createdAt),
+      'updatedAt': _dateTimeToJson(instance.updatedAt),
     };
 
 const _$ProjectStatusEnumMap = {
@@ -218,9 +214,7 @@ _$GeneratedDesignModelImpl _$$GeneratedDesignModelImplFromJson(
       backgroundColor: (json['backgroundColor'] as num).toInt(),
       surfaceColor: (json['surfaceColor'] as num).toInt(),
       prompt: json['prompt'] as String?,
-      createdAt: json['createdAt'] == null
-          ? null
-          : DateTime.parse(json['createdAt'] as String),
+      createdAt: _dateTimeFromJson(json['createdAt']),
     );
 
 Map<String, dynamic> _$$GeneratedDesignModelImplToJson(
@@ -235,5 +229,5 @@ Map<String, dynamic> _$$GeneratedDesignModelImplToJson(
       'backgroundColor': instance.backgroundColor,
       'surfaceColor': instance.surfaceColor,
       'prompt': instance.prompt,
-      'createdAt': instance.createdAt?.toIso8601String(),
+      'createdAt': _dateTimeToJson(instance.createdAt),
     };

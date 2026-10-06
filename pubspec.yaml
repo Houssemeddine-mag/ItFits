@@ -40,6 +40,7 @@ dependencies:
   camera: ^0.12.1
   wakelock_plus: ^1.8.1
   dchs_motion_sensors: ^2.0.2
+  flutter_dotenv: ^5.2.0
 
 dev_dependencies:
   flutter_test:
@@ -62,3 +63,4 @@ flutter:
   assets:
     - assets/images/icon.png
     - assets/images/logo.png
+    - .env

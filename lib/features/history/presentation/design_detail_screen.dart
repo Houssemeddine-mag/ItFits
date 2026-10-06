@@ -1,5 +1,3 @@
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -8,6 +6,8 @@ import 'package:itfits/core/services/firestore_image_service.dart';
 import 'package:itfits/core/services/project_stage.dart';
 import 'package:itfits/core/services/providers.dart';
 import 'package:itfits/core/models/project_model.dart';
+import 'package:itfits/core/router/safe_push.dart';
+import 'package:itfits/core/widgets/project_thumbnail.dart';
 
 /// Live project document.
 final designDetailProvider =
@@ -90,8 +90,11 @@ class DesignDetailScreen extends ConsumerWidget {
           }
 
           final designs = project.generatedDesigns ?? [];
-          final heroUrl =
+          String? heroUrl =
               designs.isNotEmpty ? designs.last.panoramaUrl : null;
+          if (heroUrl == null || heroUrl.isEmpty) {
+            heroUrl = project.panoramaUrl;
+          }
 
           return CustomScrollView(
             slivers: [
@@ -102,12 +105,9 @@ class DesignDetailScreen extends ConsumerWidget {
                   background: Hero(
                     tag: 'design_$designId',
                     child: heroUrl != null && heroUrl.isNotEmpty
-                        ? _buildDesignImage(heroUrl, colorScheme)
-                        : Container(
-                            color: colorScheme.primaryContainer,
-                            child: Icon(Icons.home_rounded,
-                                color: colorScheme.primary, size: 80),
-                          ),
+                        ? ProjectThumbnail(
+                            imageUrl: heroUrl, placeholderIconSize: 80)
+                        : _HeroSubcollectionFallback(projectId: project.id),
                   ),
                 ),
                 actions: [
@@ -318,11 +318,12 @@ class _StageTrackerState extends State<_StageTracker> {
 
   Future<void> _continue() async {
     if (_navigating) return;
-    final target = '/create?resume=${widget.project.id}';
-    if (GoRouterState.of(context).uri.toString() == target) return;
     setState(() => _navigating = true);
     try {
-      await context.push(target);
+      // safePush dedupes identical pushes app-wide: pushing
+      // '/create?resume=id' twice reserves the same page key twice and
+      // red-screens the Navigator (!keyReservation.contains(key)).
+      await safePush(context, '/create?resume=${widget.project.id}');
     } finally {
       if (mounted) setState(() => _navigating = false);
     }
@@ -515,8 +516,10 @@ class _CaptureSection extends ConsumerWidget {
                         borderRadius: BorderRadius.circular(12),
                         child: SizedBox(
                           width: 150,
-                          child: _captureThumb(
-                              images[index].base64Data, colorScheme),
+                          child: ProjectThumbnail(
+                            imageUrl:
+                                'data:image/jpeg;base64,${images[index].base64Data}',
+                          ),
                         ),
                       );
                     },
@@ -538,18 +541,6 @@ class _CaptureSection extends ConsumerWidget {
     );
   }
 
-  Widget _captureThumb(String base64Data, ColorScheme colorScheme) {
-    try {
-      final bytes = base64Decode(base64Data);
-      return Image.memory(bytes, fit: BoxFit.cover);
-    } catch (_) {
-      return Container(
-        color: colorScheme.surfaceContainerHighest,
-        child: const Center(
-            child: Icon(Icons.image_not_supported_rounded, size: 32)),
-      );
-    }
-  }
 }
 
 /// All finished AI designs (inline list, falling back to subcollection docs).
@@ -676,13 +667,7 @@ class _DesignCard extends StatelessWidget {
         children: [
           AspectRatio(
             aspectRatio: 16 / 9,
-            child: imageUrl.isNotEmpty
-                ? _buildDesignImage(imageUrl, colorScheme)
-                : Container(
-                    color: colorScheme.primaryContainer,
-                    child: Icon(Icons.image_rounded,
-                        color: colorScheme.primary, size: 48),
-                  ),
+            child: ProjectThumbnail(imageUrl: imageUrl.isNotEmpty ? imageUrl : null),
           ),
           Padding(
             padding: const EdgeInsets.all(12),
@@ -1053,33 +1038,25 @@ class _EmptyNote extends StatelessWidget {
   }
 }
 
-Widget _buildDesignImage(String imageUrl, ColorScheme colorScheme) {
-  if (imageUrl.startsWith('data:image')) {
-    try {
-      final bytes = base64Decode(imageUrl.split(',').last);
-      return Image.memory(bytes, fit: BoxFit.cover);
-    } catch (_) {
-      return Container(
-        color: colorScheme.surfaceContainerHighest,
-        child: const Center(
-            child: Icon(Icons.image_not_supported_rounded, size: 48)),
-      );
-    }
-  }
-  return Image.network(
-    imageUrl,
-    fit: BoxFit.cover,
-    loadingBuilder: (context, child, progress) {
-      if (progress == null) return child;
-      return Container(
-        color: colorScheme.surfaceContainerHighest,
+/// Old projects have no inline thumbnail — hero falls back to the latest
+/// full image from the `designs` subcollection.
+class _HeroSubcollectionFallback extends ConsumerWidget {
+  final String projectId;
+  const _HeroSubcollectionFallback({required this.projectId});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final docsAsync = ref.watch(projectDesignDocsProvider(projectId));
+    return docsAsync.when(
+      data: (docs) => ProjectThumbnail(
+          imageUrl: docs.isEmpty ? null : docs.first.imageUrl,
+          placeholderIconSize: 80),
+      loading: () => Container(
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
         child: const Center(child: CircularProgressIndicator()),
-      );
-    },
-    errorBuilder: (_, __, ___) => Container(
-      color: colorScheme.surfaceContainerHighest,
-      child:
-          const Center(child: Icon(Icons.image_not_supported_rounded, size: 48)),
-    ),
-  );
+      ),
+      error: (_, __) =>
+          const ProjectThumbnail(imageUrl: null, placeholderIconSize: 80),
+    );
+  }
 }

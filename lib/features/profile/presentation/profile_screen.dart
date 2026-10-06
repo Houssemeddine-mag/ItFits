@@ -2,9 +2,10 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:flutter_animate/flutter_animate.dart';
 
+import 'package:flutter/services.dart';
 import 'package:itfits/core/services/auth_service.dart';
+import 'package:itfits/core/services/openrouter_service.dart';
 import 'package:itfits/core/services/providers.dart';
 import 'package:itfits/core/models/project_model.dart';
 
@@ -103,6 +104,10 @@ class ProfileScreen extends ConsumerWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  const _SectionTitle(title: 'AI Setup'),
+                  const SizedBox(height: 12),
+                  const _AiSetupCard(),
+                  const SizedBox(height: 24),
                   _SectionTitle(title: 'My Projects', onTap: () => context.push('/history')),
                   const SizedBox(height: 12),
                   _ProjectStatsRow(projectsAsync: projectsAsync),
@@ -689,6 +694,341 @@ class _SupportTile extends StatelessWidget {
       subtitle: Text(subtitle, style: theme.textTheme.bodySmall?.copyWith(color: colorScheme.onSurfaceVariant)),
       trailing: Icon(Icons.chevron_right_rounded, color: colorScheme.onSurfaceVariant),
       onTap: onTap,
+    );
+  }
+}
+
+/// BYOK OpenRouter setup: API key + chat/image model choice.
+///
+/// The whole creation flow (room analysis, AI designer chat, design
+/// generation) prefers this key. Chat models have a free tier; image
+/// models are always paid (need OpenRouter credits). Not every model can
+/// generate images — that is why chat and image models are picked
+/// separately. The key is stored on-device in secure storage.
+class _AiSetupCard extends ConsumerStatefulWidget {
+  const _AiSetupCard();
+
+  @override
+  ConsumerState<_AiSetupCard> createState() => _AiSetupCardState();
+}
+
+class _AiSetupCardState extends ConsumerState<_AiSetupCard> {
+  final _keyCtrl = TextEditingController();
+  final _chatCtrl = TextEditingController();
+  final _imageCtrl = TextEditingController();
+  bool _obscure = true;
+  bool _saving = false;
+  bool _testing = false;
+  String? _status;
+  bool _statusOk = false;
+  bool _loaded = false;
+
+  @override
+  void dispose() {
+    _keyCtrl.dispose();
+    _chatCtrl.dispose();
+    _imageCtrl.dispose();
+    super.dispose();
+  }
+
+  void _syncFromProviders() {
+    if (_loaded) return;
+    _loaded = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await ref.read(openRouterServiceProvider).loadPersisted();
+      if (!mounted) return;
+      setState(() {
+        _keyCtrl.text = ref.read(openRouterApiKeyProvider);
+        _chatCtrl.text = ref.read(openRouterChatModelProvider);
+        _imageCtrl.text = ref.read(openRouterImageModelProvider);
+      });
+    });
+  }
+
+  Future<void> _save() async {
+    setState(() {
+      _saving = true;
+      _status = null;
+    });
+    try {
+      final svc = ref.read(openRouterServiceProvider);
+      await svc.saveApiKey(_keyCtrl.text);
+      await svc.saveModels(chat: _chatCtrl.text, image: _imageCtrl.text);
+      if (!mounted) return;
+      setState(() {
+        _statusOk = true;
+        _status = _keyCtrl.text.trim().isEmpty
+            ? 'Override removed. AI creation uses the shared .env key.'
+            : 'Saved. AI creation will now prefer your key over the shared one.';
+      });
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _test() async {
+    setState(() {
+      _testing = true;
+      _status = null;
+    });
+    try {
+      await ref.read(openRouterServiceProvider).testConnection(_keyCtrl.text);
+      if (!mounted) return;
+      setState(() {
+        _statusOk = true;
+        _status = 'Key works. Chat + models reachable.';
+      });
+    } on OpenRouterException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _statusOk = false;
+        _status = e.message;
+      });
+    } finally {
+      if (mounted) setState(() => _testing = false);
+    }
+  }
+
+  Future<void> _remove() async {
+    await ref.read(openRouterServiceProvider).clearAll();
+    if (!mounted) return;
+    setState(() {
+      _keyCtrl.clear();
+      _chatCtrl.text = OpenRouterService.defaultChatModel;
+      _imageCtrl.text = OpenRouterService.defaultImageModel;
+      _statusOk = true;
+      _status = 'Key removed.';
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    _syncFromProviders();
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final ready = ref.watch(openRouterReadyProvider);
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: cs.primaryContainer,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Icon(Icons.key_rounded, color: cs.primary, size: 22),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('OpenRouter AI key (optional override)',
+                          style: theme.textTheme.titleSmall
+                              ?.copyWith(fontWeight: FontWeight.w600)),
+                      Text(
+                        ready
+                            ? 'Connected — creation uses shared key or yours'
+                            : 'Paste OPENROUTER_API_KEY into .env',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: ready ? Colors.green.shade700 : cs.onSurfaceVariant,
+                          fontWeight: ready ? FontWeight.w600 : null,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: ready ? Colors.green.shade700 : cs.surfaceContainerHighest,
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(
+                    ready ? 'Ready' : 'Missing',
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: ready ? Colors.white : cs.onSurfaceVariant,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'ItFits ships with one shared OpenRouter key (.env → OPENROUTER_API_KEY) used by all users for space detection, AI chat, and 360 redesigns. Only fill this in to override the shared key with your own. Chat models have a free tier; image models always need credits (top up past \$1).',
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: cs.onSurfaceVariant),
+            ),
+            const SizedBox(height: 4),
+            Row(
+              children: [
+                Expanded(
+                  child: SelectableText('openrouter.ai/keys',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                          color: cs.primary, fontWeight: FontWeight.w600)),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.copy_rounded, size: 18),
+                  tooltip: 'Copy URL',
+                  onPressed: () {
+                    Clipboard.setData(
+                        const ClipboardData(text: 'https://openrouter.ai/keys'));
+                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                        content: Text('Copied: openrouter.ai/keys')));
+                  },
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _keyCtrl,
+              obscureText: _obscure,
+              enableSuggestions: false,
+              autocorrect: false,
+              decoration: InputDecoration(
+                labelText: 'OpenRouter API key (sk-or-...)',
+                prefixIcon: const Icon(Icons.vpn_key_outlined, size: 20),
+                suffixIcon: IconButton(
+                  icon: Icon(
+                      _obscure ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+                      size: 20),
+                  onPressed: () => setState(() => _obscure = !_obscure),
+                ),
+                border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12)),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _chatCtrl,
+              enableSuggestions: false,
+              autocorrect: false,
+              decoration: InputDecoration(
+                labelText: 'Chat model (free tier OK)',
+                prefixIcon: const Icon(Icons.chat_outlined, size: 20),
+                border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12)),
+              ),
+            ),
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: OpenRouterService.chatModels.map((m) {
+                final selected = _chatCtrl.text.trim() == m.id;
+                return ChoiceChip(
+                  label: Text(m.label,
+                      style: const TextStyle(fontSize: 11)),
+                  selected: selected,
+                  onSelected: (_) =>
+                      setState(() => _chatCtrl.text = m.id),
+                  visualDensity: VisualDensity.compact,
+                );
+              }).toList(),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _imageCtrl,
+              enableSuggestions: false,
+              autocorrect: false,
+              decoration: InputDecoration(
+                labelText: 'Image model (paid credits)',
+                prefixIcon:
+                    const Icon(Icons.image_outlined, size: 20),
+                border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12)),
+              ),
+            ),
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: OpenRouterService.imageModels.map((m) {
+                final selected = _imageCtrl.text.trim() == m.id;
+                return ChoiceChip(
+                  label: Text(m.label,
+                      style: const TextStyle(fontSize: 11)),
+                  selected: selected,
+                  onSelected: (_) =>
+                      setState(() => _imageCtrl.text = m.id),
+                  visualDensity: VisualDensity.compact,
+                );
+              }).toList(),
+            ),
+            if (_status != null) ...[
+              const SizedBox(height: 10),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: _statusOk
+                      ? Colors.green.withValues(alpha: 0.12)
+                      : cs.errorContainer,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text(_status!,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: _statusOk
+                          ? Colors.green.shade800
+                          : cs.onErrorContainer,
+                    )),
+              ),
+            ],
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _testing ? null : _test,
+                    icon: _testing
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2))
+                        : const Icon(Icons.wifi_tethering_rounded, size: 18),
+                    label: const Text('Test'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _remove,
+                    icon: const Icon(Icons.delete_outline, size: 18),
+                    label: const Text('Remove'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: FilledButton.icon(
+                    onPressed: _saving ? null : _save,
+                    icon: _saving
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                                strokeWidth: 2, color: Colors.white))
+                        : const Icon(Icons.save_outlined, size: 18),
+                    label: const Text('Save'),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text('Stored on-device only (secure storage), never uploaded.',
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: cs.onSurfaceVariant, fontSize: 11)),
+          ],
+        ),
+      ),
     );
   }
 }

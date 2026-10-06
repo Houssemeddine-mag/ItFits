@@ -9,6 +9,7 @@ import '../services/project_service.dart';
 import '../services/firestore_image_service.dart';
 import '../services/ai_design_service.dart';
 import '../services/ai_proxy_service.dart';
+import '../services/openrouter_service.dart';
 import '../router/app_router.dart';
 import '../models/project_model.dart';
 import '../models/floor_plan_data.dart';
@@ -82,7 +83,10 @@ final aiProxyServiceProvider = Provider<AiProxyService>((ref) {
 });
 
 final aiDesignServiceProvider = Provider<AiDesignService>((ref) {
-  return AiDesignService(ref.read(aiProxyServiceProvider));
+  return AiDesignService(
+    ref.read(aiProxyServiceProvider),
+    ref.read(openRouterServiceProvider),
+  );
 });
 
 final currentProjectProvider = StateProvider<ProjectModel?>((ref) => null);

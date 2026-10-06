@@ -537,7 +537,17 @@ class _StyleSelectionScreenState extends ConsumerState<StyleSelectionScreen> {
 
   Widget _buildPaletteList(ColorScheme colorScheme, ThemeData theme) {
     final styleId = ref.read(selectedStyleProvider);
-    final style = designStyles.firstWhere((s) => s.id == styleId);
+    final matches = designStyles.where((s) => s.id == styleId).toList();
+    // Stale id (e.g. restored from an old project) must not red-screen.
+    if (matches.isEmpty) {
+      return Text(
+        'Please pick a design style above.',
+        style: theme.textTheme.bodySmall?.copyWith(
+          color: colorScheme.onSurfaceVariant,
+        ),
+      );
+    }
+    final style = matches.first;
 
     return Column(
       children: List.generate(style.colorPalettes.length, (index) {
@@ -706,7 +716,9 @@ class _StyleSelectionScreenState extends ConsumerState<StyleSelectionScreen> {
     final selectedPrefs = ref.read(selectedPreferencesProvider);
 
     if (styleId != null) {
-      final style = designStyles.firstWhere((s) => s.id == styleId);
+      final matches = designStyles.where((s) => s.id == styleId).toList();
+      if (matches.isEmpty) return;
+      final style = matches.first;
       ref.read(selectedStyleNameProvider.notifier).state = style.name;
       if (paletteIndex != null && paletteIndex < style.colorPalettes.length) {
         ref.read(selectedPaletteProvider2.notifier).state =

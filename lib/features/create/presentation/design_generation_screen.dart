@@ -6,6 +6,9 @@ import 'package:flutter_animate/flutter_animate.dart';
 
 import 'package:itfits/core/services/providers.dart';
 import 'package:itfits/core/services/ai_design_service.dart';
+import 'package:itfits/core/services/openrouter_service.dart';
+import 'package:itfits/core/models/project_model.dart';
+import 'package:uuid/uuid.dart';
 
 final generationProgressProvider = StateProvider<double>((ref) => 0.0);
 final generationStageProvider = StateProvider<String>((ref) => 'Preparing...');
@@ -111,6 +114,7 @@ class _DesignGenerationScreenState extends ConsumerState<DesignGenerationScreen>
 
       if (project != null && user != null) {
         try {
+          // Full image → designs subcollection (detail view fallback).
           await imageService.saveGeneratedDesign(
             userId: user.uid,
             projectId: project.id,
@@ -118,6 +122,29 @@ class _DesignGenerationScreenState extends ConsumerState<DesignGenerationScreen>
             style: results.style,
             prompt: results.prompt,
           );
+        } catch (_) {}
+        try {
+          // Thumbnail + status → project doc so History/Home/detail hero
+          // render immediately instead of showing placeholders.
+          final palette = ref.read(selectedPaletteProvider2);
+          int pick(int i, int fallback) =>
+              palette.length > i ? palette[i] : fallback;
+          await ref.read(projectServiceProvider).addGeneratedDesign(
+                user.uid,
+                project.id,
+                GeneratedDesignModel(
+                  id: const Uuid().v4(),
+                  panoramaUrl: results.imageUrl,
+                  style: results.style,
+                  primaryColor: pick(0, project.primaryColor),
+                  secondaryColor: pick(1, project.secondaryColor),
+                  accentColor: pick(2, project.accentColor),
+                  backgroundColor: project.backgroundColor,
+                  surfaceColor: project.surfaceColor,
+                  prompt: results.prompt,
+                  createdAt: DateTime.now(),
+                ),
+              );
         } catch (_) {}
       }
 
@@ -153,6 +180,8 @@ class _DesignGenerationScreenState extends ConsumerState<DesignGenerationScreen>
     final stage = ref.watch(generationStageProvider);
     final styleName = ref.watch(selectedStyleNameProvider);
     final error = ref.watch(generationErrorProvider);
+    final aiReady = ref.watch(openRouterReadyProvider);
+    final imageModel = ref.watch(openRouterImageModelProvider);
 
     return Scaffold(
       backgroundColor: colorScheme.surface,
@@ -184,6 +213,23 @@ class _DesignGenerationScreenState extends ConsumerState<DesignGenerationScreen>
                     ),
                   ),
                 ),
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 5,
+                ),
+                decoration: BoxDecoration(
+                  color: colorScheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(
+                  aiReady ? 'AI: $imageModel' : 'AI: shared backend',
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
               const SizedBox(height: 28),
               if (error != null)
                 Container(

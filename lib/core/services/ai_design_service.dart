@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 
 import 'ai_proxy_service.dart';
 import 'firestore_image_service.dart' show fitDataUrlForFirestore;
+import 'openrouter_service.dart';
 import 'prompt_builder.dart';
 import '../models/floor_plan_data.dart';
 
@@ -24,8 +25,9 @@ class GeneratedDesignResult {
 
 class AiDesignService {
   final AiProxyService _proxy;
+  final OpenRouterService _openRouter;
 
-  AiDesignService(this._proxy);
+  AiDesignService(this._proxy, this._openRouter);
 
   static const _pollinationsTimeout = Duration(seconds: 120);
 
@@ -70,19 +72,38 @@ class AiDesignService {
     final fullPrompt = '$prompt $_panoramicQualitySuffix';
 
     String? imageUrl;
-    final photo = imageUrls.where((u) => u.startsWith('data:image/')).firstOrNull;
-    if (photo != null && _proxy.isAvailable) {
+    // 1) User's own OpenRouter key: full quality, reference-aware.
+    if (_openRouter.isReady) {
       try {
-        imageUrl = await _proxy.generateDesign(
-          imageDataUrl: await fitDataUrlForFirestore(photo),
-          prompt: prompt,
-          style: style,
-          roomType: roomType,
+        final photo =
+            imageUrls.where((u) => u.startsWith('data:image/')).firstOrNull;
+        imageUrl = await _openRouter.generateImage(
+          prompt: fullPrompt,
+          referenceDataUrl:
+              photo != null ? await fitDataUrlForFirestore(photo) : null,
         );
-      } on AiProxyException catch (e) {
-        debugPrint('Photo-based generation unavailable, using text-only: $e');
+      } on OpenRouterException catch (e) {
+        debugPrint('OpenRouter image unavailable, falling back: $e');
       }
     }
+    // 2) Server backend (photo-based edit).
+    if (imageUrl == null) {
+      final photo =
+          imageUrls.where((u) => u.startsWith('data:image/')).firstOrNull;
+      if (photo != null && _proxy.isAvailable) {
+        try {
+          imageUrl = await _proxy.generateDesign(
+            imageDataUrl: await fitDataUrlForFirestore(photo),
+            prompt: prompt,
+            style: style,
+            roomType: roomType,
+          );
+        } on AiProxyException catch (e) {
+          debugPrint('Photo-based generation unavailable, using text-only: $e');
+        }
+      }
+    }
+    // 3) Free text-only fallback.
     imageUrl ??= await _generatePanoramicImage(fullPrompt);
 
     return GeneratedDesignResult(
@@ -107,6 +128,13 @@ class AiDesignService {
 
     final combinedPrompt = '$prompt $description $_panoramicQualitySuffix';
 
+    if (_openRouter.isReady) {
+      try {
+        return await _openRouter.generateImage(prompt: combinedPrompt);
+      } on OpenRouterException catch (e) {
+        debugPrint('OpenRouter chat-image unavailable, falling back: $e');
+      }
+    }
     return await _generatePanoramicImage(combinedPrompt);
   }
 

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:itfits/core/theme/app_theme.dart';
 import 'package:itfits/core/services/providers.dart';
@@ -24,6 +25,13 @@ class ItFitsApp extends ConsumerWidget {
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Shared AI key for all users (bundled via `.env`, see `.env.example`).
+  // Missing file is fine — the app falls back to BYOK / server backend.
+  try {
+    await dotenv.load(fileName: '.env');
+  } catch (_) {
+    debugPrint('.env not found — using BYOK / server AI only');
+  }
   try {
     await Firebase.initializeApp(
       options: DefaultFirebaseOptions.currentPlatform,
