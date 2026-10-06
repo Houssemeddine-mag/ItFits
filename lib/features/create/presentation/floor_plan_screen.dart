@@ -715,6 +715,7 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
             final w = double.tryParse(wc.text);
             final d = double.tryParse(dc.text);
             final h = double.tryParse(hc.text);
+<<<<<<< HEAD
             if (w != null && d != null && w > 0 && d > 0) {
               setState(() {
                 _cancelPendingWall();
@@ -722,7 +723,29 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
                 if (h != null && h > 0) _plan.ceilingHeight = h;
               });
               _save();
+=======
+            if (w == null || d == null || w <= 0 || d <= 0) {
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                content: Text('Enter valid width and depth greater than 0'),
+                duration: Duration(seconds: 2),
+              ));
+              return;
+>>>>>>> c34caadaa955844d60d1c9833eca9f9da2971229
             }
+            if (hc.text.trim().isNotEmpty && (h == null || h <= 0)) {
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                content: Text('Ceiling height must be greater than 0'),
+                duration: Duration(seconds: 2),
+              ));
+              return;
+            }
+            setState(() {
+              _plan.roomWidth = w.clamp(1.0, 50.0);
+              _plan.roomDepth = d.clamp(1.0, 50.0);
+              if (h != null && h > 0) _plan.ceilingHeight = h.clamp(2.0, 6.0);
+              _rebuildWalls();
+            });
+            _save();
             Navigator.pop(ctx);
           }, child: const Text('Update')),
         ],
@@ -768,7 +791,10 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
                         if (modeLabel != null)
                           Text(modeLabel, style: TextStyle(fontSize: 10, color: cs.primary))
                         else
-                          Text('Tap wall to edit · Drag corners freely', style: TextStyle(fontSize: 10, color: cs.onSurfaceVariant)),
+                          Text(
+                            'Tap wall to edit · Drag corners · ${_plan.area.toStringAsFixed(1)} m²',
+                            style: TextStyle(fontSize: 10, color: cs.onSurfaceVariant),
+                          ),
                       ],
                     ),
                   ),
@@ -795,6 +821,7 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
 
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+<<<<<<< HEAD
               child: Row(
                 children: [
                   _chip('Door', Icons.door_sliding_outlined, _mode == _Mode.door, cs, () => _toggleMode(_Mode.door)),
@@ -809,6 +836,28 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
                   const SizedBox(width: 4),
                   _chip('Delete', Icons.delete_sweep_outlined, _mode == _Mode.deleteWall, cs, () => _toggleMode(_Mode.deleteWall), color: cs.error),
                 ],
+=======
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    _chip('Door', Icons.door_sliding_outlined, _mode == _Mode.door, cs, () => _toggleMode(_Mode.door)),
+                    const SizedBox(width: 4),
+                    _chip('Window', Icons.curtains_outlined, _mode == _Mode.window, cs, () => _toggleMode(_Mode.window)),
+                    const SizedBox(width: 4),
+                    _chip('Outlet', Icons.electrical_services_outlined, _mode == _Mode.outlet, cs, () => _toggleMode(_Mode.outlet)),
+                    const SizedBox(width: 4),
+                    _chip('Split', Icons.content_cut, _mode == _Mode.split, cs, () => _toggleMode(_Mode.split)),
+                    const SizedBox(width: 4),
+                    _chip('Wall', Icons.add_home_outlined, _mode == _Mode.addWall, cs, () {
+                      setState(() => _addWallCorner1 = null);
+                      _toggleMode(_Mode.addWall);
+                    }),
+                    const SizedBox(width: 4),
+                    _chip('Delete', Icons.delete_sweep_outlined, _mode == _Mode.deleteWall, cs, () => _toggleMode(_Mode.deleteWall), color: cs.error),
+                  ],
+                ),
+>>>>>>> c34caadaa955844d60d1c9833eca9f9da2971229
               ),
             ),
 
@@ -832,6 +881,20 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
                     return GestureDetector(
                       behavior: HitTestBehavior.opaque,
                       onTapUp: _onTapUp,
+                      onDoubleTap: () {
+                        // Quick way out: clear any selection / placement mode.
+                        if (_mode != _Mode.none ||
+                            _selectedWall != null ||
+                            _selectedIdx != null) {
+                          HapticFeedback.selectionClick();
+                          setState(() {
+                            _mode = _Mode.none;
+                            _selectedWall = null;
+                            _selectedType = '';
+                            _selectedIdx = null;
+                          });
+                        }
+                      },
                       onPanStart: _onPanStart,
                       onPanUpdate: _onPanUpdate,
                       onPanEnd: _onPanEnd,
@@ -889,6 +952,7 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
   }
 
   void _toggleMode(_Mode m) {
+    HapticFeedback.selectionClick();
     setState(() {
       _cancelPendingWall();
       _mode = _mode == m ? _Mode.none : m;
@@ -921,8 +985,8 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
 
   Widget _buildPropertyPanel(ColorScheme cs) {
     return Container(
-      constraints: const BoxConstraints(maxHeight: 200),
-      padding: const EdgeInsets.fromLTRB(12, 6, 12, 4),
+      constraints: const BoxConstraints(maxHeight: 280),
+      padding: const EdgeInsets.fromLTRB(12, 6, 12, 8),
       decoration: BoxDecoration(
         color: cs.surfaceContainerHighest,
         border: Border(top: BorderSide(color: cs.outlineVariant, width: 0.5)),
@@ -981,20 +1045,29 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
       _slider('Position', '${(d.positionAlongWall * 100).round()}%', d.positionAlongWall, _posLo(d.wallIndex, d.width), _posHi(d.wallIndex, d.width), (v) => _updateDoor(_selectedIdx!, pos: v)),
       _slider('Width', '${d.width.toStringAsFixed(2)}m', d.width, 0.5, 2.0, (v) => _updateDoor(_selectedIdx!, width: v)),
       _slider('Height', '${d.height.toStringAsFixed(2)}m', d.height, 1.5, 3.0, (v) => _updateDoor(_selectedIdx!, height: v)),
-      Row(children: [
-        const Text('Swing: ', style: TextStyle(fontSize: 10)),
-        ...DoorSwing.values.map((s) => Padding(
-          padding: const EdgeInsets.only(right: 3),
-          child: ChoiceChip(
-            label: Text(s.name, style: const TextStyle(fontSize: 9)),
-            selected: d.swing == s,
-            onSelected: (_) => _updateDoor(_selectedIdx!, swing: s),
-            visualDensity: VisualDensity.compact,
-            padding: const EdgeInsets.symmetric(horizontal: 4),
-            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.only(top: 8),
+            child: Text('Swing: ', style: TextStyle(fontSize: 10)),
           ),
-        )),
-      ]),
+          Expanded(
+            child: Wrap(
+              spacing: 3,
+              runSpacing: 2,
+              children: DoorSwing.values.map((s) => ChoiceChip(
+                label: Text(s.name, style: const TextStyle(fontSize: 9)),
+                selected: d.swing == s,
+                onSelected: (_) => _updateDoor(_selectedIdx!, swing: s),
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              )).toList(),
+            ),
+          ),
+        ],
+      ),
       _wallPicker(d.wallIndex, (i) => _updateDoor(_selectedIdx!, wall: i)),
     ]);
   }
@@ -1011,20 +1084,29 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
       _slider('Position', '${(w.positionAlongWall * 100).round()}%', w.positionAlongWall, _posLo(w.wallIndex, w.width), _posHi(w.wallIndex, w.width), (v) => _updateWindow(_selectedIdx!, pos: v)),
       _slider('Width', '${w.width.toStringAsFixed(2)}m', w.width, 0.3, 4.0, (v) => _updateWindow(_selectedIdx!, width: v)),
       _slider('Height', '${w.height.toStringAsFixed(2)}m', w.height, 0.3, 3.0, (v) => _updateWindow(_selectedIdx!, height: v)),
-      Row(children: [
-        const Text('Type: ', style: TextStyle(fontSize: 10)),
-        ...WindowType.values.map((t) => Padding(
-          padding: const EdgeInsets.only(right: 3),
-          child: ChoiceChip(
-            label: Text(t.name, style: const TextStyle(fontSize: 9)),
-            selected: w.type == t,
-            onSelected: (_) => _updateWindow(_selectedIdx!, type: t),
-            visualDensity: VisualDensity.compact,
-            padding: const EdgeInsets.symmetric(horizontal: 4),
-            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.only(top: 8),
+            child: Text('Type: ', style: TextStyle(fontSize: 10)),
           ),
-        )),
-      ]),
+          Expanded(
+            child: Wrap(
+              spacing: 3,
+              runSpacing: 2,
+              children: WindowType.values.map((t) => ChoiceChip(
+                label: Text(t.name, style: const TextStyle(fontSize: 9)),
+                selected: w.type == t,
+                onSelected: (_) => _updateWindow(_selectedIdx!, type: t),
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              )).toList(),
+            ),
+          ),
+        ],
+      ),
       _wallPicker(w.wallIndex, (i) => _updateWindow(_selectedIdx!, wall: i)),
     ]);
   }
@@ -1038,6 +1120,7 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
         Expanded(child: Text('Outlet · ${_wallName(o.wallIndex)}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600))),
         IconButton(onPressed: () => _deleteElement('outlet', _selectedIdx!), icon: Icon(Icons.delete_outline, size: 18, color: cs.error), visualDensity: VisualDensity.compact, padding: EdgeInsets.zero, constraints: const BoxConstraints()),
       ]),
+<<<<<<< HEAD
       _slider('Position', '${(o.positionAlongWall * 100).round()}%', o.positionAlongWall, _posLo(o.wallIndex, 0.1), _posHi(o.wallIndex, 0.1), (v) => _updateOutlet(_selectedIdx!, pos: v)),
       Row(children: [
         const Text('Type: ', style: TextStyle(fontSize: 10)),
@@ -1050,9 +1133,32 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
             visualDensity: VisualDensity.compact,
             padding: const EdgeInsets.symmetric(horizontal: 4),
             materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+=======
+      _slider('Position', '${(o.positionAlongWall * 100).round()}%', o.positionAlongWall, 0.05, 0.95, (v) => _updateOutlet(_selectedIdx!, pos: v)),
+      Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.only(top: 8),
+            child: Text('Type: ', style: TextStyle(fontSize: 10)),
+>>>>>>> c34caadaa955844d60d1c9833eca9f9da2971229
           ),
-        )),
-      ]),
+          Expanded(
+            child: Wrap(
+              spacing: 3,
+              runSpacing: 2,
+              children: OutletType.values.map((t) => ChoiceChip(
+                label: Text(t.name, style: const TextStyle(fontSize: 9)),
+                selected: o.type == t,
+                onSelected: (_) => _updateOutlet(_selectedIdx!, type: t),
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              )).toList(),
+            ),
+          ),
+        ],
+      ),
       _wallPicker(o.wallIndex, (i) => _updateOutlet(_selectedIdx!, wall: i)),
     ]);
   }
@@ -1073,21 +1179,30 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
 
   Widget _wallPicker(int current, ValueChanged<int> onSelected) {
     return Padding(
-      padding: const EdgeInsets.only(top: 2, bottom: 2),
-      child: Row(children: [
-        const Text('Wall: ', style: TextStyle(fontSize: 10)),
-        ...List.generate(_plan.walls.length, (i) => Padding(
-          padding: const EdgeInsets.only(right: 3),
-          child: ChoiceChip(
-            label: Text(_wallName(i), style: const TextStyle(fontSize: 9)),
-            selected: current == i,
-            onSelected: (_) => onSelected(i),
-            visualDensity: VisualDensity.compact,
-            padding: const EdgeInsets.symmetric(horizontal: 4),
-            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      padding: const EdgeInsets.only(top: 4, bottom: 2),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.only(top: 8),
+            child: Text('Wall: ', style: TextStyle(fontSize: 10)),
           ),
-        )),
-      ]),
+          Expanded(
+            child: Wrap(
+              spacing: 3,
+              runSpacing: 2,
+              children: List.generate(_plan.walls.length, (i) => ChoiceChip(
+                label: Text(_wallName(i), style: const TextStyle(fontSize: 9)),
+                selected: current == i,
+                onSelected: (_) => onSelected(i),
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              )),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

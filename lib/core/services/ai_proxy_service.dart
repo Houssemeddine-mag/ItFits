@@ -53,10 +53,11 @@ class AiProxyService {
   }
 
   Future<Object?> _call(String name, Map<String, Object> data) async {
-    if (!isAvailable) {
+    final user = firebaseReady ? FirebaseAuth.instance.currentUser : null;
+    if (user == null) {
       throw const AiProxyException('Sign in to use the AI designer.');
     }
-    final token = await FirebaseAuth.instance.currentUser!.getIdToken();
+    final token = await user.getIdToken();
     final http.Response response;
     try {
       response = await http

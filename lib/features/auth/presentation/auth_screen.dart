@@ -1,3 +1,6 @@
+import 'dart:io' show Platform;
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -43,15 +46,48 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
     try {
       final authService = ref.read(authServiceProvider);
       if (_isLogin) {
-        await authService.signInWithEmail(_emailController.text.trim(), _passwordController.text);
+        final cred = await authService.signInWithEmail(
+          _emailController.text.trim().toLowerCase(),
+          _passwordController.text,
+        );
+        debugPrint('Signed in as ${cred.user?.uid} ${cred.user?.email}');
       } else {
         await authService.signUpWithEmail(
-          _emailController.text.trim(),
+          _emailController.text.trim().toLowerCase(),
           _passwordController.text,
           _nameController.text.trim(),
         );
+        if (mounted) {
+          // New accounts verify email first.
+          context.go('/verify-email');
+          return;
+        }
       }
       if (mounted) context.go('/');
+    } catch (e) {
+      if (mounted) {
+        setState(() => _errorMessage = e.toString().replaceFirst('Exception: ', ''));
+      }
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _forgotPassword() async {
+    final email = _emailController.text.trim().toLowerCase();
+    if (email.isEmpty || !email.contains('@')) {
+      setState(() => _errorMessage = 'Enter your email above first.');
+      return;
+    }
+    _clearError();
+    setState(() => _isLoading = true);
+    try {
+      await ref.read(authServiceProvider).sendPasswordResetEmail(email);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Password reset email sent to $email')),
+        );
+      }
     } catch (e) {
       if (mounted) {
         setState(() => _errorMessage = e.toString().replaceFirst('Exception: ', ''));
@@ -67,12 +103,12 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
     try {
       final authService = ref.read(authServiceProvider);
       final result = await authService.signInWithGoogle();
-      if (mounted) {
-        if (result != null || authService.currentUser != null) {
-          context.go('/');
-        } else {
-          setState(() => _errorMessage = 'Google sign-in was cancelled');
-        }
+      if (!mounted) return;
+      if (result != null || authService.currentUser != null) {
+        context.go('/');
+      } else {
+        // null result with no user + no exception = user cancelled.
+        setState(() => _errorMessage = 'Google sign-in was cancelled');
       }
     } catch (e) {
       if (mounted) {
@@ -216,14 +252,23 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                   obscureText: _obscurePassword,
                   validator: (v) {
                     if (v == null || v.isEmpty) return 'Enter your password';
-                    if (v.length < 8) return 'Minimum 8 characters';
+                    if (!_isLogin && v.length < 6) return 'Minimum 6 characters';
+                    if (_isLogin && v.isEmpty) return 'Enter your password';
                     return null;
                   },
                   textInputAction: TextInputAction.done,
                   onFieldSubmitted: (_) => _submit(),
                   onChanged: (_) => _clearError(),
                 ).animate().fadeIn(delay: _isLogin ? 300.ms : 400.ms).slideX(begin: 0.2),
-                const SizedBox(height: 24),
+                if (_isLogin)
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: TextButton(
+                      onPressed: _isLoading ? null : _forgotPassword,
+                      child: const Text('Forgot password?'),
+                    ),
+                  ),
+                const SizedBox(height: 8),
                 FilledButton(
                   onPressed: _isLoading ? null : _submit,
                   style: FilledButton.styleFrom(
@@ -252,27 +297,45 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                   ],
                 ).animate().fadeIn(delay: _isLogin ? 450.ms : 550.ms),
                 const SizedBox(height: 16),
-                Row(
-                  children: [
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        icon: const Icon(Icons.g_mobiledata_rounded, size: 24),
-                        label: const Text('Google'),
-                        onPressed: _isLoading ? null : _signInWithGoogle,
-                        style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 14)),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        icon: const Icon(Icons.apple_rounded, size: 22),
-                        label: const Text('Apple'),
-                        onPressed: _isLoading ? null : _signInWithApple,
-                        style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 14)),
-                      ),
-                    ),
-                  ],
-                ).animate().fadeIn(delay: _isLogin ? 500.ms : 600.ms).slideY(begin: 0.2),
+                Builder(
+                  builder: (context) {
+                    // iOS auth skipped: only show Apple on Apple platforms.
+                    final showApple = !kIsWeb &&
+                        (Platform.isIOS || Platform.isMacOS);
+                    if (!showApple) {
+                      return SizedBox(
+                        width: double.infinity,
+                        child: OutlinedButton.icon(
+                          icon: const Icon(Icons.g_mobiledata_rounded, size: 24),
+                          label: const Text('Continue with Google'),
+                          onPressed: _isLoading ? null : _signInWithGoogle,
+                          style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 14)),
+                        ),
+                      ).animate().fadeIn(delay: _isLogin ? 500.ms : 600.ms).slideY(begin: 0.2);
+                    }
+                    return Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            icon: const Icon(Icons.g_mobiledata_rounded, size: 24),
+                            label: const Text('Google'),
+                            onPressed: _isLoading ? null : _signInWithGoogle,
+                            style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 14)),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            icon: const Icon(Icons.apple_rounded, size: 22),
+                            label: const Text('Apple'),
+                            onPressed: _isLoading ? null : _signInWithApple,
+                            style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 14)),
+                          ),
+                        ),
+                      ],
+                    ).animate().fadeIn(delay: _isLogin ? 500.ms : 600.ms).slideY(begin: 0.2);
+                  },
+                ),
                 const SizedBox(height: 24),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,

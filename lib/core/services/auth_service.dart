@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -10,147 +12,253 @@ class RecentLoginRequiredException implements Exception {
   const RecentLoginRequiredException();
   @override
   String toString() =>
-      'For your security, sign out and sign back in, then delete your account.';
+      'For your security, sign out and sign back in, then try again.';
 }
 
-class _DummyUser implements User {
-  @override
-  final String uid = 'dummy-user-001';
-  @override
-  final String? email = 'demo@itfits.app';
-  @override
-  final String? displayName = 'Demo User';
-  @override
-  final String? photoURL;
+/// Central auth gateway.
+///
+/// - Extends [ChangeNotifier] so GoRouter can use it directly as
+///   `refreshListenable` — no bool-toggling hacks, no stale snapshots.
+/// - Never fabricates a user. When Firebase is unavailable ([AuthService.dummy])
+///   [currentUser] is always null and every mutating call throws a clear error.
+/// - Always guarantees a `users/{uid}` Firestore profile exists after any
+///   successful sign-in (fixes console-created users with no profile doc).
+class AuthService extends ChangeNotifier {
+  /// Web (type 3) OAuth client from android/app/google-services.json.
+  /// Required so GoogleSignIn returns a valid idToken for Firebase on Android.
+  static const String _googleServerClientId =
+      '133083240626-3dmk70jrf6ackkg0go7usk2rhgp72s7c.apps.googleusercontent.com';
 
-  const _DummyUser({this.photoURL});
-
-  @override
-  dynamic noSuchMethod(Invocation invocation) => null;
-}
-
-class AuthService {
-  late final FirebaseAuth _auth;
-  late final FirebaseFirestore _firestore;
+  FirebaseAuth? _auth;
+  FirebaseFirestore? _firestore;
   bool _googleInitialized = false;
+  StreamSubscription<User?>? _authSubscription;
 
-  Future<void> _ensureGoogleInitialized() async {
-    if (_googleInitialized) return;
-    await GoogleSignIn.instance.initialize();
-    _googleInitialized = true;
-  }
   final bool _isDummy;
-  User? _dummyUser;
-  final ValueNotifier<bool> _authNotifier = ValueNotifier(false);
 
   AuthService(FirebaseAuth auth, FirebaseFirestore firestore)
       : _auth = auth,
         _firestore = firestore,
         _isDummy = false {
-    _auth.authStateChanges().listen((_) {
-      _authNotifier.value = !_authNotifier.value;
+    _authSubscription = _auth!.authStateChanges().listen((_) {
+      notifyListeners();
     });
   }
 
-  AuthService.dummy()
-      : _isDummy = true,
-        _dummyUser = const _DummyUser();
+  AuthService.dummy() : _isDummy = true;
 
-  ValueNotifier<bool> get authNotifier => _authNotifier;
+  /// Whether this is the offline fallback (Firebase failed to initialize).
+  bool get isDummy => _isDummy;
+
+  /// Back-compat: router previously used `authService.authNotifier`.
+  /// Now returns `this` since AuthService itself is a Listenable.
+  Listenable get authNotifier => this;
+
+  @override
+  void dispose() {
+    _authSubscription?.cancel();
+    super.dispose();
+  }
+
+  FirebaseAuth _requireAuth() {
+    final auth = _auth;
+    if (_isDummy || auth == null) {
+      throw Exception(
+          'Firebase is not initialized. Restart the app with network access.');
+    }
+    return auth;
+  }
+
+  FirebaseFirestore _requireFirestore() {
+    final db = _firestore;
+    if (_isDummy || db == null) {
+      throw Exception(
+          'Firebase is not initialized. Restart the app with network access.');
+    }
+    return db;
+  }
 
   Stream<User?> get authStateChanges {
-    if (_isDummy) {
-      return Stream.value(_dummyUser);
-    }
-    return _auth.authStateChanges();
+    if (_isDummy) return Stream<User?>.value(null);
+    return _auth!.authStateChanges();
   }
 
-  User? get currentUser => _isDummy ? _dummyUser : _auth.currentUser;
+  /// Always read fresh from FirebaseAuth — never cache the uid.
+  /// Caching the uid in providers was the "wrong account" bug:
+  /// after switching accounts the UI kept showing the previous user.
+  User? get currentUser => _isDummy ? null : _auth?.currentUser;
+
+  String? get currentUid => currentUser?.uid;
 
   Future<Map<String, dynamic>?> getUserProfile() async {
-    if (_isDummy) {
-      return {
-        'uid': 'dummy-user-001',
-        'email': 'demo@itfits.app',
-        'displayName': _dummyUser?.displayName ?? 'Demo User',
-        'photoURL': _dummyUser?.photoURL,
-        'plan': 'free',
-        'preferences': {
-          'theme': 'system',
-          'notifications': true,
-        },
-      };
-    }
+    if (_isDummy) return null;
     try {
-      final user = _auth.currentUser;
+      final user = _auth?.currentUser;
       if (user == null) return null;
-      final doc = await _firestore.collection('users').doc(user.uid).get();
-      if (!doc.exists) return null;
+      final db = _requireFirestore();
+      final docRef = db.collection('users').doc(user.uid);
+      var doc = await docRef.get();
+      if (!doc.exists) {
+        // Console-created users have an Auth record but no Firestore doc.
+        // Create it now so the UI never shows a generic/wrong profile.
+        await _createUserProfile(user);
+        doc = await docRef.get();
+        if (!doc.exists) return null;
+      }
       return doc.data();
-    } catch (_) {
+    } catch (e) {
+      debugPrint('Failed to load user profile: $e');
       return null;
     }
   }
 
-  Future<UserCredential?> signInWithEmail(String email, String password) async {
-    if (_isDummy) {
-      _dummyUser = _DummyUser();
-      _authNotifier.value = !_authNotifier.value;
-      return null;
+  /// Live profile stream scoped to the currently signed-in uid.
+  /// Emits null when signed out. Caller must re-subscribe on uid change
+  /// (see providers.dart authStateProvider pattern).
+  Stream<Map<String, dynamic>?> watchUserProfile() {
+    if (_isDummy) return Stream<Map<String, dynamic>?>.value(null);
+    final user = _auth?.currentUser;
+    if (user == null) return Stream<Map<String, dynamic>?>.value(null);
+    return _firestore!
+        .collection('users')
+        .doc(user.uid)
+        .snapshots()
+        .map((doc) => doc.exists ? doc.data() : null)
+        .handleError((_) => null);
+  }
+
+  Future<UserCredential> signInWithEmail(String email, String password) async {
+    final auth = _requireAuth();
+    final normalizedEmail = email.trim().toLowerCase();
+    if (normalizedEmail.isEmpty || password.isEmpty) {
+      throw Exception('Enter your email and password.');
     }
     try {
-      final credential = await _auth.signInWithEmailAndPassword(
-        email: email,
+      final credential = await auth.signInWithEmailAndPassword(
+        email: normalizedEmail,
         password: password,
       );
+      final user = credential.user ?? auth.currentUser;
+      if (user == null) {
+        throw Exception('Sign-in failed: no Firebase user.');
+      }
+      // Ensure Firestore profile exists (console-created users lack one).
+      await _createUserProfile(user);
+      notifyListeners();
       return credential;
     } on FirebaseAuthException catch (e) {
       throw _handleAuthException(e);
     }
   }
 
-  Future<UserCredential?> signUpWithEmail(String email, String password, String displayName) async {
-    if (_isDummy) {
-      _dummyUser = _DummyUser();
-      _authNotifier.value = !_authNotifier.value;
-      return null;
+  Future<UserCredential> signUpWithEmail(
+      String email, String password, String displayName) async {
+    final auth = _requireAuth();
+    final normalizedEmail = email.trim().toLowerCase();
+    final name = displayName.trim();
+    if (normalizedEmail.isEmpty || password.isEmpty) {
+      throw Exception('Enter your email and password.');
+    }
+    if (name.isEmpty) {
+      throw Exception('Enter your name.');
+    }
+    if (password.length < 6) {
+      throw Exception('Password must be at least 6 characters.');
     }
     try {
-      final credential = await _auth.createUserWithEmailAndPassword(
-        email: email,
+      final credential = await auth.createUserWithEmailAndPassword(
+        email: normalizedEmail,
         password: password,
       );
       try {
-        await credential.user?.updateDisplayName(displayName);
+        await credential.user?.updateDisplayName(name);
         await credential.user?.reload();
       } catch (e) {
         debugPrint('Display name update failed: $e');
       }
-      await _createUserProfile(_auth.currentUser ?? credential.user!);
+      final user = auth.currentUser ?? credential.user;
+      if (user != null) {
+        await _createUserProfile(user);
+        try {
+          await user.sendEmailVerification();
+        } catch (e) {
+          debugPrint('Email verification send failed: $e');
+        }
+      }
+      notifyListeners();
       return credential;
     } on FirebaseAuthException catch (e) {
       throw _handleAuthException(e);
     }
   }
 
-  Future<UserCredential?> signInWithGoogle() async {
-    if (_isDummy) {
-      _dummyUser = _DummyUser();
-      _authNotifier.value = !_authNotifier.value;
-      return null;
+  /// Sends a password-reset email. Does not reveal whether the account exists.
+  Future<void> sendPasswordResetEmail(String email) async {
+    final auth = _requireAuth();
+    final normalizedEmail = email.trim().toLowerCase();
+    if (normalizedEmail.isEmpty) {
+      throw Exception('Enter your email address.');
     }
+    try {
+      await auth.sendPasswordResetEmail(email: normalizedEmail);
+    } on FirebaseAuthException catch (e) {
+      throw _handleAuthException(e);
+    }
+  }
+
+  Future<void> sendEmailVerification() async {
+    if (_isDummy) return;
+    final user = _auth?.currentUser;
+    if (user == null || user.emailVerified) return;
+    try {
+      await user.sendEmailVerification();
+    } on FirebaseAuthException catch (e) {
+      throw _handleAuthException(e);
+    }
+  }
+
+  Future<void> reloadUser() async {
+    if (_isDummy) return;
+    await _auth?.currentUser?.reload();
+    notifyListeners();
+  }
+
+  Future<void> _ensureGoogleInitialized() async {
+    if (_googleInitialized) return;
+    try {
+      await GoogleSignIn.instance.initialize(
+        serverClientId: _googleServerClientId,
+      );
+    } catch (e) {
+      debugPrint('GoogleSignIn initialize failed (may be already init): $e');
+    }
+    _googleInitialized = true;
+  }
+
+  Future<UserCredential?> signInWithGoogle() async {
+    final auth = _requireAuth();
     try {
       await _ensureGoogleInitialized();
       final GoogleSignInAccount googleUser =
           await GoogleSignIn.instance.authenticate();
 
       final GoogleSignInAuthentication googleAuth = googleUser.authentication;
-      final credential = GoogleAuthProvider.credential(
-        idToken: googleAuth.idToken,
-      );
+      final idToken = googleAuth.idToken;
+      if (idToken == null || idToken.isEmpty) {
+        throw Exception(
+          'Google sign-in did not return an ID token. '
+          'Check the serverClientId / OAuth configuration.',
+        );
+      }
+      final credential = GoogleAuthProvider.credential(idToken: idToken);
 
-      final userCredential = await _auth.signInWithCredential(credential);
-      await _createUserProfile(userCredential.user!);
+      final userCredential = await auth.signInWithCredential(credential);
+      final user = userCredential.user ?? auth.currentUser;
+      if (user == null) {
+        throw Exception('Google sign-in failed: no Firebase user.');
+      }
+      await _createUserProfile(user);
+      notifyListeners();
       return userCredential;
     } on GoogleSignInException catch (e) {
       if (e.code == GoogleSignInExceptionCode.canceled) return null;
@@ -161,11 +269,7 @@ class AuthService {
   }
 
   Future<UserCredential?> signInWithApple() async {
-    if (_isDummy) {
-      _dummyUser = _DummyUser();
-      _authNotifier.value = !_authNotifier.value;
-      return null;
-    }
+    final auth = _requireAuth();
     try {
       final credential = await SignInWithApple.getAppleIDCredential(
         scopes: [
@@ -179,39 +283,51 @@ class AuthService {
         accessToken: credential.authorizationCode,
       );
 
-      final userCredential = await _auth.signInWithCredential(oauthCredential);
-      await _createUserProfile(userCredential.user!);
+      final userCredential = await auth.signInWithCredential(oauthCredential);
+      final user = userCredential.user ?? auth.currentUser;
+      if (user == null) {
+        throw Exception('Apple Sign In failed: no Firebase user.');
+      }
+      await _createUserProfile(user);
+      notifyListeners();
       return userCredential;
+    } on FirebaseAuthException catch (e) {
+      throw _handleAuthException(e);
     } catch (e) {
+      if (e.toString().contains('canceled')) return null;
       throw Exception('Apple Sign In failed: $e');
     }
   }
 
   Future<void> signOut() async {
     if (_isDummy) {
-      _dummyUser = null;
-      _authNotifier.value = !_authNotifier.value;
+      notifyListeners();
       return;
     }
-    try {
-      await _ensureGoogleInitialized();
-      await GoogleSignIn.instance.signOut();
-    } catch (_) {
+    if (_googleInitialized) {
+      try {
+        await GoogleSignIn.instance.signOut();
+      } catch (e) {
+        debugPrint('Google sign-out failed: $e');
+      }
     }
-    await _auth.signOut();
+    await _auth?.signOut();
+    notifyListeners();
   }
 
   Future<void> _createUserProfile(User user) async {
     try {
-      final docRef = _firestore.collection('users').doc(user.uid);
+      final db = _requireFirestore();
+      final docRef = db.collection('users').doc(user.uid);
       final doc = await docRef.get();
 
       if (!doc.exists) {
         await docRef.set({
           'uid': user.uid,
-          'email': user.email,
+          'email': user.email?.toLowerCase(),
           'displayName': user.displayName,
           'photoURL': user.photoURL,
+          'plan': 'free',
           'createdAt': FieldValue.serverTimestamp(),
           'updatedAt': FieldValue.serverTimestamp(),
           'designs': [],
@@ -220,8 +336,18 @@ class AuthService {
             'notifications': true,
           },
         });
+      } else {
+        // Keep profile fresh without overwriting user data (esp. plan).
+        await docRef.set({
+          'email': user.email?.toLowerCase(),
+          if (user.displayName != null) 'displayName': user.displayName,
+          if (user.photoURL != null) 'photoURL': user.photoURL,
+          'updatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
       }
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('Failed to create/update user profile: $e');
+    }
   }
 
   Future<void> updateProfile({
@@ -230,50 +356,90 @@ class AuthService {
     String? bio,
     Map<String, dynamic>? preferences,
   }) async {
-    if (_isDummy) {
-      if (_dummyUser != null) {
-        _dummyUser = _DummyUser(photoURL: photoURL ?? _dummyUser?.photoURL);
-      }
-      return;
-    }
-    final user = _auth.currentUser;
+    final auth = _requireAuth();
+    final user = auth.currentUser;
     if (user == null) return;
 
-    if (displayName != null) {
+    if (displayName != null && displayName.trim().isNotEmpty) {
       try {
-        await user.updateDisplayName(displayName);
-      } catch (_) {}
+        await user.updateDisplayName(displayName.trim());
+      } catch (e) {
+        debugPrint('Display name update failed: $e');
+      }
     }
 
     try {
       final updateData = <String, dynamic>{
         'updatedAt': FieldValue.serverTimestamp(),
       };
-      if (displayName != null) updateData['displayName'] = displayName;
+      if (displayName != null) updateData['displayName'] = displayName.trim();
       if (photoURL != null) updateData['photoURL'] = photoURL;
       if (bio != null) updateData['bio'] = bio;
-      if (preferences != null) updateData['preferences'] = preferences;
+      if (preferences != null) {
+        updateData['preferences'] = preferences;
+      }
 
-      await _firestore.collection('users').doc(user.uid).update(updateData);
-    } catch (_) {}
+      await _requireFirestore()
+          .collection('users')
+          .doc(user.uid)
+          .set(updateData, SetOptions(merge: true));
+      notifyListeners();
+    } catch (e) {
+      debugPrint('Profile update failed: $e');
+      rethrow;
+    }
+  }
+
+  Future<void> updatePassword({
+    required String currentPassword,
+    required String newPassword,
+  }) async {
+    final auth = _requireAuth();
+    final user = auth.currentUser;
+    if (user == null || user.email == null) {
+      throw Exception('Sign in again to change your password.');
+    }
+    if (newPassword.length < 6) {
+      throw Exception('New password must be at least 6 characters.');
+    }
+    try {
+      final credential = EmailAuthProvider.credential(
+        email: user.email!,
+        password: currentPassword,
+      );
+      await user.reauthenticateWithCredential(credential);
+      await user.updatePassword(newPassword);
+    } on FirebaseAuthException catch (e) {
+      throw _handleAuthException(e);
+    }
+  }
+
+  /// Re-authenticate with password. Call before [deleteAccount] when Firebase
+  /// reports `requires-recent-login`.
+  Future<void> reauthenticateWithPassword(String password) async {
+    final auth = _requireAuth();
+    final user = auth.currentUser;
+    if (user == null || user.email == null) {
+      throw Exception('Sign in again to continue.');
+    }
+    try {
+      final credential = EmailAuthProvider.credential(
+        email: user.email!,
+        password: password,
+      );
+      await user.reauthenticateWithCredential(credential);
+    } on FirebaseAuthException catch (e) {
+      throw _handleAuthException(e);
+    }
   }
 
   Future<void> deleteAccount() async {
-    if (_isDummy) {
-      _dummyUser = null;
-      _authNotifier.value = !_authNotifier.value;
-      return;
-    }
-    final user = _auth.currentUser;
+    final auth = _requireAuth();
+    final db = _requireFirestore();
+    final user = auth.currentUser;
     if (user == null) return;
 
-    final lastSignIn = user.metadata.lastSignInTime;
-    if (lastSignIn == null ||
-        DateTime.now().difference(lastSignIn) > const Duration(minutes: 5)) {
-      throw const RecentLoginRequiredException();
-    }
-
-    await ProjectService.deleteUserTree(_firestore, user.uid);
+    await ProjectService.deleteUserTree(db, user.uid);
     try {
       await user.delete();
     } on FirebaseAuthException catch (e) {
@@ -282,29 +448,44 @@ class AuthService {
       }
       rethrow;
     }
+    notifyListeners();
   }
 
   Exception _handleAuthException(FirebaseAuthException e) {
     switch (e.code) {
       case 'weak-password':
-        return Exception('The password provided is too weak.');
+        return Exception(
+            'The password provided is too weak. Use at least 6 characters.');
       case 'email-already-in-use':
-        return Exception('An account already exists for that email.');
+      case 'credential-already-in-use':
+        return Exception(
+            'An account already exists for that email. Try signing in.');
       case 'user-not-found':
       case 'wrong-password':
       case 'invalid-credential':
       case 'INVALID_LOGIN_CREDENTIALS':
         return Exception('Incorrect email or password.');
+      case 'account-exists-with-different-credential':
+        return Exception(
+            'This email is registered with a different sign-in method. Try Google sign-in.');
       case 'network-request-failed':
         return Exception('No connection to the server. Check your internet.');
       case 'invalid-email':
         return Exception('The email address is not valid.');
       case 'user-disabled':
-        return Exception('This user has been disabled.');
+        return Exception('This account has been disabled. Contact support.');
       case 'too-many-requests':
-        return Exception('Too many requests. Try again later.');
+        return Exception('Too many attempts. Try again later.');
       case 'operation-not-allowed':
-        return Exception('This sign-in method is not enabled.');
+        return Exception(
+          'This sign-in method is not enabled in Firebase Console. '
+          'Enable Email/Password and Google under Authentication > Sign-in method.',
+        );
+      case 'requires-recent-login':
+        return const RecentLoginRequiredException();
+      case 'user-mismatch':
+      case 'provider-already-linked':
+        return Exception('Sign-in failed (${e.code}): ${e.message}');
       default:
         return Exception('Sign-in failed (${e.code}): ${e.message}');
     }

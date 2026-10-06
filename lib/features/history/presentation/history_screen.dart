@@ -7,13 +7,19 @@ import 'package:flutter_animate/flutter_animate.dart';
 
 import 'package:itfits/core/services/providers.dart';
 import 'package:itfits/core/models/project_model.dart';
+import 'package:itfits/core/services/project_stage.dart'
+    show isProjectComplete, stageLabelFor;
+
+/// Normalizes room-type strings so 'Living Room', 'living_room' and
+/// filter names like 'livingRoom' compare equal.
+String _normalizeRoom(String s) =>
+    s.toLowerCase().replaceAll(RegExp(r'[_\s]'), '');
 
 final historyProjectsProvider = StreamProvider<List<ProjectModel>>((ref) {
-  final projectService = ref.read(projectServiceProvider);
-  final authService = ref.read(authServiceProvider);
-  final user = authService.currentUser;
-  if (user == null) return Stream.value(const <ProjectModel>[]);
-  return projectService.watchUserProjects(user.uid);
+  final uid = ref.watch(authStateProvider).asData?.value?.uid;
+  if (uid == null) return Stream.value(const <ProjectModel>[]);
+  final projectService = ref.watch(projectServiceProvider);
+  return projectService.watchUserProjects(uid);
 });
 
 enum HistoryFilter { all, livingRoom, bedroom, kitchen, bathroom, office }
@@ -84,7 +90,7 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
                     p.style.toLowerCase().contains(_searchQuery.toLowerCase()) ||
                     p.roomType.toLowerCase().contains(_searchQuery.toLowerCase());
                 final matchesFilter = filter == HistoryFilter.all ||
-                    p.roomType.toLowerCase() == filter.name;
+                    _normalizeRoom(p.roomType).contains(_normalizeRoom(filter.name));
                 return matchesSearch && matchesFilter;
               }).toList();
 
@@ -107,8 +113,7 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
                     (context, index) {
                       final project = filteredProjects[index];
                       return _HistoryProjectCard(
-                        project: project,
-                        onTap: () => context.push('/design/${project.id}'),
+                        project: filteredProjects[index],
                         onLongPress: () => _showProjectOptions(project),
                       ).animate()
                           .fadeIn(delay: (index * 50).ms, duration: 300.ms)
@@ -161,6 +166,10 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
             title: const Text('Open Project'),
             onTap: () {
               Navigator.pop(context);
+              if (GoRouterState.of(context).uri.toString() ==
+                  '/design/${project.id}') {
+                return;
+              }
               context.push('/design/${project.id}');
             },
           ),
@@ -331,31 +340,55 @@ class _FilterBottomSheet extends StatelessWidget {
   }
 }
 
-class _HistoryProjectCard extends StatelessWidget {
+class _HistoryProjectCard extends StatefulWidget {
   final ProjectModel project;
-  final VoidCallback onTap;
   final VoidCallback onLongPress;
 
   const _HistoryProjectCard({
     required this.project,
-    required this.onTap,
     required this.onLongPress,
   });
 
   @override
+  State<_HistoryProjectCard> createState() => _HistoryProjectCardState();
+}
+
+class _HistoryProjectCardState extends State<_HistoryProjectCard> {
+  bool _navigating = false;
+
+  Future<void> _openProject() async {
+    // Guard against double-taps pushing the same route twice, which
+    // crashes the Navigator with duplicate page keys (red screen).
+    if (_navigating) return;
+    final id = widget.project.id;
+    if (GoRouterState.of(context).uri.toString() == '/design/$id') return;
+    setState(() => _navigating = true);
+    try {
+      await context.push('/design/$id');
+    } finally {
+      if (mounted) setState(() => _navigating = false);
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final project = widget.project;
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
     final hasDesigns = project.generatedDesigns != null && project.generatedDesigns!.isNotEmpty;
     final thumbnailUrl = hasDesigns ? project.generatedDesigns!.last.panoramaUrl : null;
     final designCount = hasDesigns ? project.generatedDesigns!.length : 0;
     final roomTypeDisplay = project.roomType.replaceAll('_', ' ');
+    final roomLabel = roomTypeDisplay.isNotEmpty
+        ? roomTypeDisplay[0].toUpperCase() + roomTypeDisplay.substring(1)
+        : 'Room';
+    final complete = isProjectComplete(project);
 
     return Card(
       clipBehavior: Clip.antiAlias,
       child: InkWell(
-        onTap: onTap,
-        onLongPress: onLongPress,
+        onTap: _openProject,
+        onLongPress: widget.onLongPress,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -377,7 +410,39 @@ class _HistoryProjectCard extends StatelessWidget {
                       backgroundColor: Colors.black.withValues(alpha: 0.6),
                       child: IconButton(
                         icon: const Icon(Icons.more_vert_rounded, color: Colors.white),
-                        onPressed: onLongPress,
+                        onPressed: widget.onLongPress,
+                      ),
+                    ),
+                  ),
+                  Positioned(
+                    top: 8,
+                    left: 8,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: complete
+                            ? Colors.green.shade700
+                            : Colors.orange.shade800,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            complete ? Icons.check_rounded : Icons.autorenew_rounded,
+                            size: 12,
+                            color: Colors.white,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            complete ? 'Done' : stageLabelFor(project),
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ),
@@ -407,7 +472,7 @@ class _HistoryProjectCard extends StatelessWidget {
                           borderRadius: BorderRadius.circular(4),
                         ),
                         child: Text(
-                          roomTypeDisplay[0].toUpperCase() + roomTypeDisplay.substring(1),
+                          roomLabel,
                           style: theme.textTheme.labelSmall?.copyWith(
                             color: colorScheme.onPrimaryContainer,
                             fontWeight: FontWeight.w500,
