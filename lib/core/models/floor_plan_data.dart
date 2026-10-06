@@ -76,14 +76,17 @@ class WallSegment {
   };
 
   factory WallSegment.fromJson(Map<String, dynamic> json) => WallSegment(
-    start: Offset(json['startX'] as double, json['startY'] as double),
-    end: Offset(json['endX'] as double, json['endY'] as double),
+    start: Offset(_d(json['startX']), _d(json['startY'])),
+    end: Offset(_d(json['endX']), _d(json['endY'])),
     isExternal: json['isExternal'] as bool? ?? true,
     controlPoint: json['controlX'] != null
-        ? Offset(json['controlX'] as double, json['controlY'] as double)
+        ? Offset(_d(json['controlX']), _d(json['controlY']))
         : null,
   );
 }
+
+double _d(Object? v, [double fallback = 0]) =>
+    v is num ? v.toDouble() : fallback;
 
 class Door {
   final double positionAlongWall;
@@ -100,6 +103,14 @@ class Door {
     required this.wallIndex,
   });
 
+  Door copyWith({double? positionAlongWall, int? wallIndex}) => Door(
+    positionAlongWall: positionAlongWall ?? this.positionAlongWall,
+    width: width,
+    height: height,
+    swing: swing,
+    wallIndex: wallIndex ?? this.wallIndex,
+  );
+
   Map<String, dynamic> toJson() => {
     'positionAlongWall': positionAlongWall,
     'width': width,
@@ -109,11 +120,11 @@ class Door {
   };
 
   factory Door.fromJson(Map<String, dynamic> json) => Door(
-    positionAlongWall: json['positionAlongWall'] as double,
+    positionAlongWall: _d(json['positionAlongWall'], 0.5),
     width: (json['width'] as num?)?.toDouble() ?? 0.9,
     height: (json['height'] as num?)?.toDouble() ?? 2.1,
     swing: DoorSwing.values[json['swing'] as int? ?? 1],
-    wallIndex: json['wallIndex'] as int,
+    wallIndex: (json['wallIndex'] as num? ?? 0).toInt(),
   );
 }
 
@@ -134,6 +145,16 @@ class FloorWindow {
     required this.wallIndex,
   });
 
+  FloorWindow copyWith({double? positionAlongWall, int? wallIndex}) =>
+      FloorWindow(
+        positionAlongWall: positionAlongWall ?? this.positionAlongWall,
+        width: width,
+        height: height,
+        sillHeight: sillHeight,
+        type: type,
+        wallIndex: wallIndex ?? this.wallIndex,
+      );
+
   Map<String, dynamic> toJson() => {
     'positionAlongWall': positionAlongWall,
     'width': width,
@@ -144,12 +165,12 @@ class FloorWindow {
   };
 
   factory FloorWindow.fromJson(Map<String, dynamic> json) => FloorWindow(
-    positionAlongWall: json['positionAlongWall'] as double,
+    positionAlongWall: _d(json['positionAlongWall'], 0.5),
     width: (json['width'] as num?)?.toDouble() ?? 1.2,
     height: (json['height'] as num?)?.toDouble() ?? 1.2,
     sillHeight: (json['sillHeight'] as num?)?.toDouble() ?? 0.9,
     type: WindowType.values[json['type'] as int? ?? 0],
-    wallIndex: json['wallIndex'] as int,
+    wallIndex: (json['wallIndex'] as num? ?? 0).toInt(),
   );
 }
 
@@ -166,6 +187,13 @@ class Outlet {
     required this.wallIndex,
   });
 
+  Outlet copyWith({double? positionAlongWall, int? wallIndex}) => Outlet(
+    positionAlongWall: positionAlongWall ?? this.positionAlongWall,
+    type: type,
+    heightFromFloor: heightFromFloor,
+    wallIndex: wallIndex ?? this.wallIndex,
+  );
+
   Map<String, dynamic> toJson() => {
     'positionAlongWall': positionAlongWall,
     'type': type.index,
@@ -174,10 +202,10 @@ class Outlet {
   };
 
   factory Outlet.fromJson(Map<String, dynamic> json) => Outlet(
-    positionAlongWall: json['positionAlongWall'] as double,
+    positionAlongWall: _d(json['positionAlongWall'], 0.5),
     type: OutletType.values[json['type'] as int? ?? 0],
     heightFromFloor: (json['heightFromFloor'] as num?)?.toDouble() ?? 0.3,
-    wallIndex: json['wallIndex'] as int,
+    wallIndex: (json['wallIndex'] as num? ?? 0).toInt(),
   );
 }
 
@@ -204,6 +232,243 @@ class FloorPlanData {
         outlets = outlets ?? [];
 
   double get area => roomWidth * roomDepth;
+
+  static const double _eps = 1e-3;
+
+  static bool samePoint(Offset a, Offset b) => (a - b).distance < _eps;
+
+  Rect get bounds {
+    if (walls.isEmpty) return Rect.fromLTWH(0, 0, roomWidth, roomDepth);
+    var minX = double.infinity, minY = double.infinity;
+    var maxX = double.negativeInfinity, maxY = double.negativeInfinity;
+    for (final w in walls) {
+      for (final p in [w.start, w.end]) {
+        minX = min(minX, p.dx);
+        minY = min(minY, p.dy);
+        maxX = max(maxX, p.dx);
+        maxY = max(maxY, p.dy);
+      }
+    }
+    return Rect.fromLTRB(minX, minY, maxX, maxY);
+  }
+
+  void updateBounds() {
+    final b = bounds;
+    roomWidth = max(0.5, b.width);
+    roomDepth = max(0.5, b.height);
+  }
+
+  List<Offset> get outline {
+    final ext = walls.where((w) => w.isExternal).toList();
+    if (ext.length < 3) return walls.map((w) => w.start).toList();
+    final used = List<bool>.filled(ext.length, false);
+    used[0] = true;
+    final pts = <Offset>[ext.first.start];
+    var tip = ext.first.end;
+    for (var step = 1; step < ext.length; step++) {
+      var found = false;
+      for (var k = 0; k < ext.length && !found; k++) {
+        if (used[k]) continue;
+        if (samePoint(ext[k].start, tip)) {
+          pts.add(ext[k].start);
+          tip = ext[k].end;
+        } else if (samePoint(ext[k].end, tip)) {
+          pts.add(ext[k].end);
+          tip = ext[k].start;
+        } else {
+          continue;
+        }
+        used[k] = true;
+        found = true;
+      }
+      if (!found) break;
+    }
+    return pts;
+  }
+
+  Offset get centroid {
+    final pts = outline;
+    if (pts.length < 3) return bounds.center;
+    var a = 0.0, cx = 0.0, cy = 0.0;
+    for (var i = 0; i < pts.length; i++) {
+      final p = pts[i], q = pts[(i + 1) % pts.length];
+      final cross = p.dx * q.dy - q.dx * p.dy;
+      a += cross;
+      cx += (p.dx + q.dx) * cross;
+      cy += (p.dy + q.dy) * cross;
+    }
+    if (a.abs() < 1e-9) return bounds.center;
+    return Offset(cx / (3 * a), cy / (3 * a));
+  }
+
+  Offset inwardNormal(int i) {
+    final w = walls[i];
+    final n = w.normal;
+    final toCenter = centroid - w.midpoint;
+    return (n.dx * toCenter.dx + n.dy * toCenter.dy) >= 0 ? n : -n;
+  }
+
+  String wallDirection(int i) {
+    if (i < 0 || i >= walls.length) return 'Unknown';
+    if (!walls[i].isExternal) return 'Interior';
+    final out = -inwardNormal(i);
+    if (out.dx.abs() >= out.dy.abs()) return out.dx > 0 ? 'East' : 'West';
+    return out.dy < 0 ? 'North' : 'South';
+  }
+
+  int? wallIndexForDirection(String direction) {
+    final d = direction.toLowerCase();
+    int? best;
+    var bestLen = -1.0;
+    for (var i = 0; i < walls.length; i++) {
+      if (wallDirection(i).toLowerCase() == d && walls[i].length > bestLen) {
+        best = i;
+        bestLen = walls[i].length;
+      }
+    }
+    return best;
+  }
+
+  double clampPosition(int wallIndex, double t, double elementWidth) {
+    final len = walls[wallIndex].length;
+    if (len <= 0) return 0.5;
+    final half = (elementWidth / 2) / len;
+    if (half >= 0.5) return 0.5;
+    return t.clamp(half, 1 - half);
+  }
+
+  void _remapElements(({int wall, double pos})? Function(int wall, double pos) map) {
+    for (var i = doors.length - 1; i >= 0; i--) {
+      final r = map(doors[i].wallIndex, doors[i].positionAlongWall);
+      if (r == null) {
+        doors.removeAt(i);
+      } else {
+        doors[i] = doors[i].copyWith(wallIndex: r.wall, positionAlongWall: r.pos);
+      }
+    }
+    for (var i = windows.length - 1; i >= 0; i--) {
+      final r = map(windows[i].wallIndex, windows[i].positionAlongWall);
+      if (r == null) {
+        windows.removeAt(i);
+      } else {
+        windows[i] = windows[i].copyWith(wallIndex: r.wall, positionAlongWall: r.pos);
+      }
+    }
+    for (var i = outlets.length - 1; i >= 0; i--) {
+      final r = map(outlets[i].wallIndex, outlets[i].positionAlongWall);
+      if (r == null) {
+        outlets.removeAt(i);
+      } else {
+        outlets[i] = outlets[i].copyWith(wallIndex: r.wall, positionAlongWall: r.pos);
+      }
+    }
+  }
+
+  int splitWall(int index, double t) {
+    final wall = walls[index];
+    final p = wall.getPointAtPosition(t);
+    walls[index] = WallSegment(start: wall.start, end: p, isExternal: wall.isExternal);
+    walls.insert(index + 1, WallSegment(start: p, end: wall.end, isExternal: wall.isExternal));
+    _remapElements((w, pos) {
+      if (w < index) return (wall: w, pos: pos);
+      if (w > index) return (wall: w + 1, pos: pos);
+      return pos < t
+          ? (wall: index, pos: pos / t)
+          : (wall: index + 1, pos: (pos - t) / (1 - t));
+    });
+    return index + 1;
+  }
+
+  bool mergeAt(Offset point) {
+    final at = <int>[];
+    for (var i = 0; i < walls.length; i++) {
+      if (samePoint(walls[i].start, point) || samePoint(walls[i].end, point)) {
+        at.add(i);
+      }
+    }
+    if (at.length != 2) return false;
+    var ia = at[0], ib = at[1];
+    var a = walls[ia], b = walls[ib];
+    if (a.isExternal != b.isExternal) return false;
+    if (a.length < _eps || b.length < _eps) return false;
+    final da = (a.end - a.start) / a.length;
+    final db = (b.end - b.start) / b.length;
+    if ((da.dx * db.dy - da.dy * db.dx).abs() > 0.02) return false;
+
+    var flipA = false, flipB = false;
+    if (samePoint(b.end, point) && samePoint(a.start, point)) {
+      final t = ia; ia = ib; ib = t;
+      final w = a; a = b; b = w;
+    } else if (samePoint(a.start, point) && samePoint(b.start, point)) {
+      flipA = true;
+    } else if (samePoint(a.end, point) && samePoint(b.end, point)) {
+      flipB = true;
+    }
+    final aStart = flipA ? a.end : a.start;
+    final bEnd = flipB ? b.start : b.end;
+    final merged = WallSegment(start: aStart, end: bEnd, isExternal: a.isExternal);
+    final total = merged.length;
+    final fa = a.length / total;
+
+    final keep = min(ia, ib), drop = max(ia, ib);
+    walls[keep] = merged;
+    walls.removeAt(drop);
+    _remapElements((w, pos) {
+      if (w == ia) {
+        final p = flipA ? 1 - pos : pos;
+        return (wall: keep, pos: p * fa);
+      }
+      if (w == ib) {
+        final p = flipB ? 1 - pos : pos;
+        return (wall: keep, pos: fa + p * (1 - fa));
+      }
+      return (wall: w > drop ? w - 1 : w, pos: pos);
+    });
+    return true;
+  }
+
+  void deleteWall(int index) {
+    final wall = walls[index];
+    walls.removeAt(index);
+    _remapElements((w, pos) {
+      if (w == index) return null;
+      return (wall: w > index ? w - 1 : w, pos: pos);
+    });
+    mergeAt(wall.start);
+    mergeAt(wall.end);
+    updateBounds();
+  }
+
+  void moveCorner(Offset from, Offset to) {
+    for (var i = 0; i < walls.length; i++) {
+      final w = walls[i];
+      if (samePoint(w.start, from)) walls[i] = w.copyWith(start: to);
+      if (samePoint(walls[i].end, from)) walls[i] = walls[i].copyWith(end: to);
+    }
+  }
+
+  void resizeTo(double width, double depth) {
+    if (walls.isEmpty) {
+      roomWidth = width;
+      roomDepth = depth;
+      return;
+    }
+    final b = bounds;
+    final sx = b.width > _eps ? width / b.width : 1.0;
+    final sy = b.height > _eps ? depth / b.height : 1.0;
+    Offset s(Offset p) =>
+        Offset(b.left + (p.dx - b.left) * sx, b.top + (p.dy - b.top) * sy);
+    for (var i = 0; i < walls.length; i++) {
+      final w = walls[i];
+      walls[i] = WallSegment(
+        start: s(w.start),
+        end: s(w.end),
+        isExternal: w.isExternal,
+        controlPoint: w.controlPoint == null ? null : s(w.controlPoint!),
+      );
+    }
+    updateBounds();
+  }
 
   static FloorPlanData defaultRoom() {
     return FloorPlanData(
@@ -234,26 +499,8 @@ class FloorPlanData {
     );
   }
 
-  String get wallDirections {
-    if (walls.isEmpty) return '';
-    final dirs = <String>[];
-    for (int i = 0; i < walls.length; i++) {
-      final w = walls[i];
-      final angle = w.angle;
-      if (angle.abs() < 0.1 || (angle - 2 * pi).abs() < 0.1) {
-        dirs.add('South');
-      } else if ((angle - pi / 2).abs() < 0.1) {
-        dirs.add('West');
-      } else if ((angle - pi).abs() < 0.1 || (angle + pi).abs() < 0.1) {
-        dirs.add('North');
-      } else if ((angle + pi / 2).abs() < 0.1 || (angle - 3 * pi / 2).abs() < 0.1) {
-        dirs.add('East');
-      } else {
-        dirs.add('Diagonal');
-      }
-    }
-    return dirs.join(', ');
-  }
+  String get wallDirections =>
+      List.generate(walls.length, wallDirection).join(', ');
 
   String toPromptDescription() {
     final buffer = StringBuffer();
@@ -387,15 +634,7 @@ class FloorPlanData {
     return aliases[roomType] ?? roomType;
   }
 
-  String _getWallDirection(int wallIndex) {
-    if (wallIndex >= walls.length) return 'Unknown';
-    final angle = walls[wallIndex].angle;
-    if (angle.abs() < 0.1 || (angle - 2 * pi).abs() < 0.1) return 'South';
-    if ((angle - pi / 2).abs() < 0.1) return 'West';
-    if ((angle - pi).abs() < 0.1 || (angle + pi).abs() < 0.1) return 'North';
-    if ((angle + pi / 2).abs() < 0.1 || (angle - 3 * pi / 2).abs() < 0.1) return 'East';
-    return 'Diagonal';
-  }
+  String _getWallDirection(int wallIndex) => wallDirection(wallIndex);
 
   String _windowTypeName(WindowType type) {
     switch (type) {

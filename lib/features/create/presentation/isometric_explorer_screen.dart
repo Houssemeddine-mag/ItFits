@@ -1,4 +1,3 @@
-import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -25,8 +24,8 @@ class _IsometricExplorerScreenState extends ConsumerState<IsometricExplorerScree
   double _offsetY = 0.0;
   bool _showGrid = true;
   bool _showLabels = true;
-  Offset? _lastPanPosition;
-  bool _isRotating = false;
+  Offset? _lastFocal;
+  double _zoomAtStart = 1.0;
 
   static const double _minZoom = 0.2;
   static const double _maxZoom = 4.0;
@@ -67,18 +66,10 @@ class _IsometricExplorerScreenState extends ConsumerState<IsometricExplorerScree
               child: Stack(
                 children: [
                   GestureDetector(
-                    onLongPressStart: _handleLongPressStart,
-                    onLongPressMoveUpdate: _handleLongPressMove,
-                    onLongPressEnd: (_) {
-                      _lastPanPosition = null;
-                      _isRotating = false;
-                    },
-                    onPanStart: _handlePanStart,
-                    onPanUpdate: _handlePanUpdate,
-                    onPanEnd: (_) => _lastPanPosition = null,
+                    behavior: HitTestBehavior.opaque,
                     onScaleStart: _handleScaleStart,
                     onScaleUpdate: _handleScaleUpdate,
-                    onScaleEnd: (_) => _lastPanPosition = null,
+                    onScaleEnd: (_) => _lastFocal = null,
                     child: LayoutBuilder(
                       builder: (context, constraints) {
                         return CustomPaint(
@@ -113,60 +104,26 @@ class _IsometricExplorerScreenState extends ConsumerState<IsometricExplorerScree
     );
   }
 
-  void _handleLongPressStart(LongPressStartDetails details) {
-    _isRotating = true;
-    _lastPanPosition = details.localPosition;
-  }
-
-  void _handleLongPressMove(LongPressMoveUpdateDetails details) {
-    if (_lastPanPosition != null) {
-      final dx = details.localPosition.dx - _lastPanPosition!.dx;
-      final dy = details.localPosition.dy - _lastPanPosition!.dy;
-      setState(() {
-        _rotationY += dx * 0.005;
-        _rotationX = (_rotationX - dy * 0.005).clamp(0.1, 1.2);
-      });
-    }
-    _lastPanPosition = details.localPosition;
-  }
-
-  void _handlePanStart(DragStartDetails details) {
-    _lastPanPosition = details.localPosition;
-  }
-
-  void _handlePanUpdate(DragUpdateDetails details) {
-    if (_isRotating) return;
-    if (_lastPanPosition != null) {
-      final dx = details.localPosition.dx - _lastPanPosition!.dx;
-      final dy = details.localPosition.dy - _lastPanPosition!.dy;
-      setState(() {
-        _offsetX += dx;
-        _offsetY += dy;
-      });
-    }
-    _lastPanPosition = details.localPosition;
-  }
-
   void _handleScaleStart(ScaleStartDetails details) {
-    _lastPanPosition = details.focalPoint;
+    _lastFocal = details.focalPoint;
+    _zoomAtStart = _zoom;
   }
 
   void _handleScaleUpdate(ScaleUpdateDetails details) {
-    if (_lastPanPosition != null && details.pointerCount == 1) {
-      final dx = details.focalPoint.dx - _lastPanPosition!.dx;
-      final dy = details.focalPoint.dy - _lastPanPosition!.dy;
-      setState(() {
-        _offsetX += dx;
-        _offsetY += dy;
-      });
-    }
-    _lastPanPosition = details.focalPoint;
-
-    if (details.pointerCount >= 2) {
-      setState(() {
-        _zoom = (_zoom * (details.scale / max(details.scale - 0.01, 0.01))).clamp(_minZoom, _maxZoom);
-      });
-    }
+    final last = _lastFocal;
+    _lastFocal = details.focalPoint;
+    if (last == null) return;
+    final delta = details.focalPoint - last;
+    setState(() {
+      if (details.pointerCount == 1) {
+        _rotationY += delta.dx * 0.008;
+        _rotationX = (_rotationX + delta.dy * 0.006).clamp(0.1, 1.45);
+      } else {
+        _zoom = (_zoomAtStart * details.scale).clamp(_minZoom, _maxZoom);
+        _offsetX += delta.dx;
+        _offsetY += delta.dy;
+      }
+    });
   }
 
   void _zoomIn() {
@@ -215,7 +172,7 @@ class _IsometricExplorerScreenState extends ConsumerState<IsometricExplorerScree
                   ),
                 ),
                 Text(
-                  'Drag to pan \u2022 Hold to rotate \u2022 Pinch to zoom',
+                  'Drag to rotate \u2022 Two fingers to pan \u2022 Pinch to zoom',
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: colorScheme.onSurfaceVariant,
                   ),

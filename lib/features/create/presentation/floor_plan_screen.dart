@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:itfits/core/services/ai_proxy_service.dart';
+import 'package:itfits/core/services/firestore_image_service.dart' show fitDataUrlForFirestore;
 
 import 'package:itfits/core/models/floor_plan_data.dart';
 import 'package:itfits/core/services/providers.dart';
@@ -15,6 +16,17 @@ class FloorPlanScreen extends ConsumerStatefulWidget {
 
   @override
   ConsumerState<FloorPlanScreen> createState() => _FloorPlanScreenState();
+}
+
+String wallName(FloorPlanData plan, int i, {bool short = false}) {
+  if (i < 0 || i >= plan.walls.length) return 'Wall ${i + 1}';
+  final dir = plan.wallDirection(i);
+  final same = [
+    for (var k = 0; k < plan.walls.length; k++)
+      if (plan.wallDirection(k) == dir) k,
+  ];
+  final base = short ? (dir == 'Interior' ? 'Int' : dir[0]) : dir;
+  return same.length > 1 ? '$base ${same.indexOf(i) + 1}' : base;
 }
 
 enum _Mode { none, door, window, outlet, split, addWall, deleteWall }
@@ -37,11 +49,14 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
   int _dragElementIdx = -1;
 
   Offset? _addWallCorner1;
+  bool _corner1FromSplit = false;
 
   FloorPlanData? _originalPlan;
 
   Offset _origin = Offset.zero;
   double _ppm = 80;
+
+  static const double _cornerSnapPx = 24;
 
   @override
   void initState() {
@@ -65,8 +80,22 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
   Offset _worldToScreen(Offset w) => _origin + w * _ppm;
   Offset _screenToWorld(Offset s) => (s - _origin) / _ppm;
 
-  bool _samePoint(Offset a, Offset b) =>
-      (a - b).distance < 0.001;
+  bool _samePoint(Offset a, Offset b) => FloorPlanData.samePoint(a, b);
+
+  Offset? _cornerNear(Offset screenPos) {
+    Offset? best;
+    var bestDist = _cornerSnapPx;
+    for (final w in _plan.walls) {
+      for (final p in [w.start, w.end]) {
+        final d = (_worldToScreen(p) - screenPos).distance;
+        if (d < bestDist) {
+          bestDist = d;
+          best = p;
+        }
+      }
+    }
+    return best;
+  }
 
   double _pointToSegDist(Offset p, Offset a, Offset b) {
     final ab = b - a;
@@ -151,37 +180,33 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
   }
 
   void _onTapUp(TapUpDetails details) {
-    final hit = _hitTest(details.localPosition);
-
     if (_mode == _Mode.addWall) {
       _handleAddWallTap(details.localPosition);
       return;
     }
 
-    if (_mode == _Mode.deleteWall && hit == 'wall') {
-      _deleteWall(_selectedWall!);
+    if (_mode != _Mode.none) {
+      final wall = _findWallAtPoint(details.localPosition);
+      if (wall == null) return;
+      switch (_mode) {
+        case _Mode.deleteWall:
+          _deleteWall(wall);
+        case _Mode.split:
+          _splitWall(wall);
+        case _Mode.door:
+          _placeElement('door', wall);
+        case _Mode.window:
+          _placeElement('window', wall);
+        case _Mode.outlet:
+          _placeElement('outlet', wall);
+        case _Mode.none:
+        case _Mode.addWall:
+          break;
+      }
       return;
     }
 
-    if (_mode == _Mode.split && hit == 'wall') {
-      _splitWall(_selectedWall!);
-      setState(() => _mode = _Mode.none);
-      return;
-    }
-
-    if (_mode == _Mode.door && hit == 'wall') {
-      _placeElement('door', _selectedWall!);
-      return;
-    }
-    if (_mode == _Mode.window && hit == 'wall') {
-      _placeElement('window', _selectedWall!);
-      return;
-    }
-    if (_mode == _Mode.outlet && hit == 'wall') {
-      _placeElement('outlet', _selectedWall!);
-      return;
-    }
-
+    final hit = _hitTest(details.localPosition);
     setState(() {
       _selectedType = '';
       _selectedIdx = null;
@@ -197,6 +222,7 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
   }
 
   void _onPanStart(DragStartDetails details) {
+    if (_mode != _Mode.none) return;
     final hit = _hitTest(details.localPosition);
     if (hit == 'corner') {
       setState(() => _dragTarget = _DragTarget.corner);
@@ -229,120 +255,37 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
     });
 
     if (wasCornerDrag && cornerPos != null) {
-      _tryMergeCornerOntoWall(cornerPos);
-      _tryUnmergeAtPoint(cornerPos);
+      setState(() {
+        _dropCornerOntoWall(cornerPos);
+        _plan.mergeAt(cornerPos);
+        _plan.updateBounds();
+      });
     }
 
     _save();
   }
 
-  void _tryMergeCornerOntoWall(Offset cornerPos) {
+  void _dropCornerOntoWall(Offset cornerPos) {
     for (int i = 0; i < _plan.walls.length; i++) {
       final w = _plan.walls[i];
       if (_samePoint(w.start, cornerPos) || _samePoint(w.end, cornerPos)) continue;
-      final dist = _pointToSegDist(cornerPos, w.start, w.end);
-      if (dist < 0.1) {
-        final t = _positionAlongWall(cornerPos, w);
-        final snapPt = w.getPointAtPosition(t);
-        _moveCornerTo(cornerPos, snapPt);
-        _splitWallAtIndex(i, t);
-        _mergeNearbyCorners();
-        _updateBounds();
-        setState(() {});
-        _save();
-        break;
-      }
+      if (_pointToSegDist(cornerPos, w.start, w.end) >= 0.1) continue;
+      final t = _projectOnWall(cornerPos, w);
+      if (t <= 0.02 || t >= 0.98) continue;
+      _plan.moveCorner(cornerPos, w.getPointAtPosition(t));
+      _plan.splitWall(i, t);
+      HapticFeedback.lightImpact();
+      return;
     }
-  }
-
-  void _moveCornerTo(Offset from, Offset to) {
-    if (_samePoint(from, to)) return;
-    for (int i = 0; i < _plan.walls.length; i++) {
-      final w = _plan.walls[i];
-      if (_samePoint(w.start, from)) _plan.walls[i] = w.copyWith(start: to);
-      if (_samePoint(w.end, from)) _plan.walls[i] = w.copyWith(end: to);
-    }
-  }
-
-  void _tryUnmergeAtPoint(Offset point) {
-    final matching = <int>[];
-    for (int i = 0; i < _plan.walls.length; i++) {
-      final w = _plan.walls[i];
-      if (_samePoint(w.start, point) || _samePoint(w.end, point)) {
-        matching.add(i);
-      }
-    }
-    if (matching.length != 2) return;
-
-    final a = _plan.walls[matching[0]];
-    final b = _plan.walls[matching[1]];
-
-    final dirA = a.end - a.start;
-    final dirB = b.end - b.start;
-    final lenA = dirA.distance;
-    final lenB = dirB.distance;
-    if (lenA < 0.001 || lenB < 0.001) return;
-    final normA = Offset(dirA.dx / lenA, dirA.dy / lenA);
-    final normB = Offset(dirB.dx / lenB, dirB.dy / lenB);
-    final cross = (normA.dx * normB.dy - normA.dy * normB.dx).abs();
-    if (cross > 0.05) return;
-
-    final hasElements = _plan.doors.any((d) => d.wallIndex == matching[0] || d.wallIndex == matching[1])
-        || _plan.windows.any((w) => w.wallIndex == matching[0] || w.wallIndex == matching[1])
-        || _plan.outlets.any((o) => o.wallIndex == matching[0] || o.wallIndex == matching[1]);
-    if (hasElements) return;
-
-    Offset mergedStart = _samePoint(a.start, point) ? a.end : a.start;
-    Offset mergedEnd = _samePoint(b.start, point) ? b.end : b.start;
-    final merged = WallSegment(start: mergedStart, end: mergedEnd, isExternal: a.isExternal);
-
-    final hi = matching[0] > matching[1] ? matching[0] : matching[1];
-    final lo = matching[0] > matching[1] ? matching[1] : matching[0];
-    _plan.walls.removeAt(hi);
-    _plan.walls.removeAt(lo);
-    _plan.walls.insert(lo, merged);
-    _reindexAfterDelete(hi);
-    _reindexAfterDelete(lo);
-    _updateBounds();
-    setState(() {});
-    _save();
   }
 
   void _moveCorner(Offset newWorldPos) {
-    final wallIdx = _dragCornerWall;
-    final wall = _plan.walls[wallIdx];
-    final isStart = _dragCornerIsStart;
-
-    final oldCorner = isStart ? wall.start : wall.end;
-
-    for (int i = 0; i < _plan.walls.length; i++) {
-      final w = _plan.walls[i];
-      if (_samePoint(w.start, oldCorner)) {
-        _plan.walls[i] = w.copyWith(start: newWorldPos);
-      }
-      if (_samePoint(w.end, oldCorner)) {
-        _plan.walls[i] = w.copyWith(end: newWorldPos);
-      }
-    }
-
-    _updateBounds();
-    setState(() {});
-  }
-
-  void _updateBounds() {
-    if (_plan.walls.isEmpty) return;
-    double minX = double.infinity, minY = double.infinity;
-    double maxX = double.negativeInfinity, maxY = double.negativeInfinity;
-    for (final w in _plan.walls) {
-      for (final pt in [w.start, w.end]) {
-        minX = min(minX, pt.dx);
-        minY = min(minY, pt.dy);
-        maxX = max(maxX, pt.dx);
-        maxY = max(maxY, pt.dy);
-      }
-    }
-    _plan.roomWidth = max(0.5, maxX - minX);
-    _plan.roomDepth = max(0.5, maxY - minY);
+    final wall = _plan.walls[_dragCornerWall];
+    final oldCorner = _dragCornerIsStart ? wall.start : wall.end;
+    setState(() {
+      _plan.moveCorner(oldCorner, newWorldPos);
+      _plan.updateBounds();
+    });
   }
 
   void _dragElement(Offset screenPos) {
@@ -351,54 +294,33 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
     if (_dragElementType == 'door' && _dragElementIdx < _plan.doors.length) {
       final door = _plan.doors[_dragElementIdx];
       if (door.wallIndex < _plan.walls.length) {
-        final wall = _plan.walls[door.wallIndex];
-        final pos = _clampPosition(world, wall);
-        _plan.doors[_dragElementIdx] = Door(
-          positionAlongWall: pos,
-          width: door.width,
-          height: door.height,
-          swing: door.swing,
-          wallIndex: door.wallIndex,
-        );
-        setState(() {});
+        final t = _projectOnWall(world, _plan.walls[door.wallIndex]);
+        setState(() => _plan.doors[_dragElementIdx] = door.copyWith(
+            positionAlongWall: _plan.clampPosition(door.wallIndex, t, door.width)));
       }
     } else if (_dragElementType == 'window' && _dragElementIdx < _plan.windows.length) {
       final win = _plan.windows[_dragElementIdx];
       if (win.wallIndex < _plan.walls.length) {
-        final wall = _plan.walls[win.wallIndex];
-        final pos = _clampPosition(world, wall);
-        _plan.windows[_dragElementIdx] = FloorWindow(
-          positionAlongWall: pos,
-          width: win.width,
-          height: win.height,
-          sillHeight: win.sillHeight,
-          type: win.type,
-          wallIndex: win.wallIndex,
-        );
-        setState(() {});
+        final t = _projectOnWall(world, _plan.walls[win.wallIndex]);
+        setState(() => _plan.windows[_dragElementIdx] = win.copyWith(
+            positionAlongWall: _plan.clampPosition(win.wallIndex, t, win.width)));
       }
     } else if (_dragElementType == 'outlet' && _dragElementIdx < _plan.outlets.length) {
       final out = _plan.outlets[_dragElementIdx];
       if (out.wallIndex < _plan.walls.length) {
-        final wall = _plan.walls[out.wallIndex];
-        final pos = _clampPosition(world, wall);
-        _plan.outlets[_dragElementIdx] = Outlet(
-          positionAlongWall: pos,
-          type: out.type,
-          heightFromFloor: out.heightFromFloor,
-          wallIndex: out.wallIndex,
-        );
-        setState(() {});
+        final t = _projectOnWall(world, _plan.walls[out.wallIndex]);
+        setState(() => _plan.outlets[_dragElementIdx] = out.copyWith(
+            positionAlongWall: _plan.clampPosition(out.wallIndex, t, 0.1)));
       }
     }
   }
 
-  double _clampPosition(Offset world, WallSegment wall) {
+  double _projectOnWall(Offset world, WallSegment wall) {
     final wallVec = wall.end - wall.start;
     final len2 = wallVec.dx * wallVec.dx + wallVec.dy * wallVec.dy;
     if (len2 == 0) return 0.5;
     final t = ((world - wall.start).dx * wallVec.dx + (world - wall.start).dy * wallVec.dy) / len2;
-    return t.clamp(0.05, 0.95);
+    return t.clamp(0.0, 1.0);
   }
 
   void _placeElement(String type, int wallIdx) {
@@ -406,12 +328,16 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
     setState(() {
       switch (type) {
         case 'door':
-          _plan.doors.add(Door(positionAlongWall: 0.5, wallIndex: wallIdx));
+          _plan.doors.add(Door(
+              positionAlongWall: _plan.clampPosition(wallIdx, 0.5, 0.9),
+              wallIndex: wallIdx));
           _selectedType = 'door';
           _selectedIdx = _plan.doors.length - 1;
           break;
         case 'window':
-          _plan.windows.add(FloorWindow(positionAlongWall: 0.5, wallIndex: wallIdx));
+          _plan.windows.add(FloorWindow(
+              positionAlongWall: _plan.clampPosition(wallIdx, 0.5, 1.2),
+              wallIndex: wallIdx));
           _selectedType = 'window';
           _selectedIdx = _plan.windows.length - 1;
           break;
@@ -435,147 +361,66 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
 
   void _splitWall(int wallIdx) {
     HapticFeedback.mediumImpact();
-    final wall = _plan.walls[wallIdx];
-    final mid = wall.midpoint;
-
     setState(() {
-      final w1 = WallSegment(start: wall.start, end: mid, isExternal: wall.isExternal);
-      final w2 = WallSegment(start: mid, end: wall.end, isExternal: wall.isExternal);
-      _plan.walls[wallIdx] = w1;
-      _plan.walls.insert(wallIdx + 1, w2);
-      _reindexAfterSplit(wallIdx);
+      _plan.splitWall(wallIdx, 0.5);
       _mode = _Mode.none;
     });
     _save();
   }
 
-  void _reindexAfterSplit(int splitIdx) {
-    for (int i = 0; i < _plan.doors.length; i++) {
-      final d = _plan.doors[i];
-      if (d.wallIndex > splitIdx) {
-        _plan.doors[i] = Door(
-          positionAlongWall: d.positionAlongWall,
-          width: d.width, height: d.height, swing: d.swing,
-          wallIndex: d.wallIndex + 1,
-        );
-      }
-    }
-    for (int i = 0; i < _plan.windows.length; i++) {
-      final w = _plan.windows[i];
-      if (w.wallIndex > splitIdx) {
-        _plan.windows[i] = FloorWindow(
-          positionAlongWall: w.positionAlongWall,
-          width: w.width, height: w.height, sillHeight: w.sillHeight,
-          type: w.type, wallIndex: w.wallIndex + 1,
-        );
-      }
-    }
-    for (int i = 0; i < _plan.outlets.length; i++) {
-      final o = _plan.outlets[i];
-      if (o.wallIndex > splitIdx) {
-        _plan.outlets[i] = Outlet(
-          positionAlongWall: o.positionAlongWall,
-          type: o.type, heightFromFloor: o.heightFromFloor,
-          wallIndex: o.wallIndex + 1,
-        );
-      }
-    }
-  }
-
   void _handleAddWallTap(Offset screenPos) {
-    final world = _screenToWorld(screenPos);
-
-    if (_addWallCorner1 == null) {
-      final wallIdx = _findWallAtPoint(screenPos);
-      if (wallIdx == null) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Tap on an existing wall to start the new wall'),
-          duration: Duration(seconds: 2),
-        ));
-        return;
-      }
-      final t = _positionAlongWall(world, _plan.walls[wallIdx]);
-      final cornerPos = _plan.walls[wallIdx].getPointAtPosition(t);
-      _splitWallAtIndex(wallIdx, t);
-      setState(() => _addWallCorner1 = cornerPos);
+    final corner = _cornerNear(screenPos);
+    final wallIdx = corner == null ? _findWallAtPoint(screenPos) : null;
+    if (corner == null && wallIdx == null) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('Corner set — tap another wall or corner for the end'),
+        content: Text(_addWallCorner1 == null
+            ? 'Tap on an existing wall or corner to start the new wall'
+            : 'Tap on a wall or an existing corner to finish'),
         duration: const Duration(seconds: 2),
       ));
-    } else {
-      final wallIdx = _findWallAtPoint(screenPos);
-      if (wallIdx == null) {
-        final snapped = _snapToCorner(world);
-        if ((snapped - world).distance * _ppm < 25) {
-          if ((_addWallCorner1! - snapped).distance < 0.05) {
-            setState(() => _addWallCorner1 = null);
-            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-              content: Text('Wall too short — tap further away'),
-              duration: Duration(seconds: 2),
-            ));
-            return;
-          }
-          _addWallBetween(_addWallCorner1!, snapped);
-          setState(() {
-            _addWallCorner1 = null;
-            _mode = _Mode.none;
-          });
-        } else {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('Tap on a wall or an existing corner'),
-            duration: Duration(seconds: 2),
-          ));
-        }
-        return;
-      }
-
-      final t = _positionAlongWall(world, _plan.walls[wallIdx]);
-      final corner2 = _plan.walls[wallIdx].getPointAtPosition(t);
-
-      if ((_addWallCorner1! - corner2).distance < 0.05) {
-        setState(() => _addWallCorner1 = null);
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Wall too short — tap further away'),
-          duration: Duration(seconds: 2),
-        ));
-        return;
-      }
-
-      _splitWallAtIndex(wallIdx, t);
-      _addWallBetween(_addWallCorner1!, corner2);
-      setState(() {
-        _addWallCorner1 = null;
-        _mode = _Mode.none;
-      });
+      return;
     }
-  }
 
-  void _splitWallAtIndex(int wallIdx, double t) {
+    final point = corner ??
+        _plan.walls[wallIdx!].getPointAtPosition(
+            _projectOnWall(_screenToWorld(screenPos), _plan.walls[wallIdx]));
+
+    if (_addWallCorner1 != null && (point - _addWallCorner1!).distance < 0.05) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Wall too short — tap further away'),
+        duration: Duration(seconds: 2),
+      ));
+      return;
+    }
+
+    var split = false;
+    setState(() {
+      if (corner == null) {
+        _plan.splitWall(wallIdx!, _projectOnWall(point, _plan.walls[wallIdx]));
+        split = true;
+      }
+      if (_addWallCorner1 == null) {
+        _addWallCorner1 = point;
+        _corner1FromSplit = split;
+      } else {
+        _plan.walls.add(WallSegment(start: _addWallCorner1!, end: point, isExternal: false));
+        _plan.updateBounds();
+        _addWallCorner1 = null;
+        _corner1FromSplit = false;
+        _mode = _Mode.none;
+      }
+    });
     HapticFeedback.lightImpact();
-    final wall = _plan.walls[wallIdx];
-    final mid = wall.getPointAtPosition(t);
-    final w1 = WallSegment(start: wall.start, end: mid, isExternal: wall.isExternal);
-    final w2 = WallSegment(start: mid, end: wall.end, isExternal: wall.isExternal);
-    setState(() {
-      _plan.walls[wallIdx] = w1;
-      _plan.walls.insert(wallIdx + 1, w2);
-      _reindexAfterSplit(wallIdx);
-    });
+    _save();
   }
 
-  void _addWallBetween(Offset start, Offset end) {
-    HapticFeedback.mediumImpact();
-    setState(() {
-      _plan.walls.add(WallSegment(start: start, end: end, isExternal: false));
-      _mergeNearbyCorners();
-      _updateBounds();
-    });
+  void _cancelPendingWall() {
+    final corner = _addWallCorner1;
+    if (corner == null) return;
+    if (_corner1FromSplit) _plan.mergeAt(corner);
+    _addWallCorner1 = null;
+    _corner1FromSplit = false;
     _save();
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text('Wall added — drag corners to reshape'),
-      duration: const Duration(seconds: 2),
-      backgroundColor: Colors.green.shade700,
-    ));
   }
 
   int? _findWallAtPoint(Offset screenPos) {
@@ -592,153 +437,20 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
     return best;
   }
 
-  double _positionAlongWall(Offset world, WallSegment wall) {
-    final wallVec = wall.end - wall.start;
-    final len2 = wallVec.dx * wallVec.dx + wallVec.dy * wallVec.dy;
-    if (len2 == 0) return 0.5;
-    final t = ((world - wall.start).dx * wallVec.dx + (world - wall.start).dy * wallVec.dy) / len2;
-    return t.clamp(0.05, 0.95);
-  }
-
-  Offset _snapToCorner(Offset world) {
-    const snapDist = 0.15;
-    for (final wall in _plan.walls) {
-      for (final pt in [wall.start, wall.end]) {
-        if ((world - pt).distance < snapDist) return pt;
-      }
-    }
-    return world;
-  }
-
-  void _mergeNearbyCorners() {
-    const threshold = 0.1;
-    for (int i = 0; i < _plan.walls.length; i++) {
-      for (final (isStart, _) in [(true, i), (false, i)]) {
-        final pt = isStart ? _plan.walls[i].start : _plan.walls[i].end;
-        for (int j = 0; j < _plan.walls.length; j++) {
-          if (j == i) continue;
-          for (final (otherStart, _) in [(true, j), (false, j)]) {
-            final other = otherStart ? _plan.walls[j].start : _plan.walls[j].end;
-            if ((pt - other).distance < threshold && (pt - other).distance > 0.001) {
-              _plan.walls[j] = otherStart
-                  ? _plan.walls[j].copyWith(start: pt)
-                  : _plan.walls[j].copyWith(end: pt);
-            }
-          }
-        }
-      }
-    }
-  }
-
   void _deleteWall(int wallIdx) {
     HapticFeedback.mediumImpact();
-    final deletedWall = _plan.walls[wallIdx];
-    final ep1 = deletedWall.start;
-    final ep2 = deletedWall.end;
-
     setState(() {
-      _plan.walls.removeAt(wallIdx);
-      _plan.doors.removeWhere((d) => d.wallIndex == wallIdx);
-      _plan.windows.removeWhere((w) => w.wallIndex == wallIdx);
-      _plan.outlets.removeWhere((o) => o.wallIndex == wallIdx);
-      _reindexAfterDelete(wallIdx);
-
-      _tryMergeAtPoint(ep1);
-      _tryMergeAtPoint(ep2);
-
-      _updateBounds();
+      _plan.deleteWall(wallIdx);
       _mode = _Mode.none;
       _selectedWall = null;
+      _selectedType = '';
+      _selectedIdx = null;
     });
     _save();
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
       content: Text('Wall deleted'),
       duration: Duration(seconds: 2),
     ));
-  }
-
-  void _reindexAfterDelete(int deletedIdx) {
-    for (int i = 0; i < _plan.doors.length; i++) {
-      final d = _plan.doors[i];
-      if (d.wallIndex > deletedIdx) {
-        _plan.doors[i] = Door(
-          positionAlongWall: d.positionAlongWall,
-          width: d.width, height: d.height, swing: d.swing,
-          wallIndex: d.wallIndex - 1,
-        );
-      }
-    }
-    for (int i = 0; i < _plan.windows.length; i++) {
-      final w = _plan.windows[i];
-      if (w.wallIndex > deletedIdx) {
-        _plan.windows[i] = FloorWindow(
-          positionAlongWall: w.positionAlongWall,
-          width: w.width, height: w.height, sillHeight: w.sillHeight,
-          type: w.type, wallIndex: w.wallIndex - 1,
-        );
-      }
-    }
-    for (int i = 0; i < _plan.outlets.length; i++) {
-      final o = _plan.outlets[i];
-      if (o.wallIndex > deletedIdx) {
-        _plan.outlets[i] = Outlet(
-          positionAlongWall: o.positionAlongWall,
-          type: o.type, heightFromFloor: o.heightFromFloor,
-          wallIndex: o.wallIndex - 1,
-        );
-      }
-    }
-  }
-
-  void _tryMergeAtPoint(Offset point) {
-    final matching = <int>[];
-    for (int i = 0; i < _plan.walls.length; i++) {
-      final w = _plan.walls[i];
-      if (_samePoint(w.start, point) || _samePoint(w.end, point)) {
-        matching.add(i);
-      }
-    }
-
-    if (matching.length == 2) {
-      final a = _plan.walls[matching[0]];
-      final b = _plan.walls[matching[1]];
-
-      final dirA = (a.end - a.start);
-      final dirB = (b.end - b.start);
-      final lenA = dirA.distance;
-      final lenB = dirB.distance;
-      if (lenA < 0.001 || lenB < 0.001) return;
-
-      final normA = Offset(dirA.dx / lenA, dirA.dy / lenA);
-      final normB = Offset(dirB.dx / lenB, dirB.dy / lenB);
-      final cross = (normA.dx * normB.dy - normA.dy * normB.dx).abs();
-      if (cross > 0.05) return;
-
-      Offset mergedStart;
-      Offset mergedEnd;
-      if (_samePoint(a.start, point)) {
-        mergedStart = a.end;
-      } else {
-        mergedStart = a.start;
-      }
-      if (_samePoint(b.start, point)) {
-        mergedEnd = b.end;
-      } else {
-        mergedEnd = b.start;
-      }
-
-      final merged = WallSegment(start: mergedStart, end: mergedEnd, isExternal: a.isExternal);
-      final idxA = matching[0];
-      final idxB = matching[1];
-      final hi = idxA > idxB ? idxA : idxB;
-      final lo = idxA > idxB ? idxB : idxA;
-      _plan.walls.removeAt(hi);
-      _plan.walls.removeAt(lo);
-      _plan.walls.insert(lo, merged);
-
-      _reindexAfterDelete(hi);
-      _reindexAfterDelete(lo);
-    }
   }
 
   void _resetPlan() {
@@ -756,6 +468,8 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
               HapticFeedback.mediumImpact();
               setState(() {
                 _plan = FloorPlanData.fromJson(_originalPlan!.toJson());
+                _addWallCorner1 = null;
+                _corner1FromSplit = false;
                 _selectedWall = null;
                 _selectedType = '';
                 _selectedIdx = null;
@@ -787,15 +501,22 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
     _save();
   }
 
+  double _posLo(int wall, double width) => _plan.clampPosition(wall, 0, width);
+
+  double _posHi(int wall, double width) =>
+      max(_plan.clampPosition(wall, 1, width), _posLo(wall, width) + 0.001);
+
   void _updateDoor(int idx, {double? pos, double? width, double? height, DoorSwing? swing, int? wall}) {
     final d = _plan.doors[idx];
+    final wallIdx = wall ?? d.wallIndex;
+    final newWidth = width ?? d.width;
     setState(() {
       _plan.doors[idx] = Door(
-        positionAlongWall: pos ?? d.positionAlongWall,
-        width: width ?? d.width,
+        positionAlongWall: _plan.clampPosition(wallIdx, pos ?? d.positionAlongWall, newWidth),
+        width: newWidth,
         height: height ?? d.height,
         swing: swing ?? d.swing,
-        wallIndex: wall ?? d.wallIndex,
+        wallIndex: wallIdx,
       );
     });
     _save();
@@ -803,14 +524,16 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
 
   void _updateWindow(int idx, {double? pos, double? width, double? height, double? sill, WindowType? type, int? wall}) {
     final w = _plan.windows[idx];
+    final wallIdx = wall ?? w.wallIndex;
+    final newWidth = width ?? w.width;
     setState(() {
       _plan.windows[idx] = FloorWindow(
-        positionAlongWall: pos ?? w.positionAlongWall,
-        width: width ?? w.width,
+        positionAlongWall: _plan.clampPosition(wallIdx, pos ?? w.positionAlongWall, newWidth),
+        width: newWidth,
         height: height ?? w.height,
         sillHeight: sill ?? w.sillHeight,
         type: type ?? w.type,
-        wallIndex: wall ?? w.wallIndex,
+        wallIndex: wallIdx,
       );
     });
     _save();
@@ -818,26 +541,19 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
 
   void _updateOutlet(int idx, {double? pos, OutletType? type, double? height, int? wall}) {
     final o = _plan.outlets[idx];
+    final wallIdx = wall ?? o.wallIndex;
     setState(() {
       _plan.outlets[idx] = Outlet(
-        positionAlongWall: pos ?? o.positionAlongWall,
+        positionAlongWall: _plan.clampPosition(wallIdx, pos ?? o.positionAlongWall, 0.1),
         type: type ?? o.type,
         heightFromFloor: height ?? o.heightFromFloor,
-        wallIndex: wall ?? o.wallIndex,
+        wallIndex: wallIdx,
       );
     });
     _save();
   }
 
-  String _wallName(int i) {
-    if (i >= _plan.walls.length) return 'Wall ${i + 1}';
-    final a = _plan.walls[i].angle;
-    if (a.abs() < 0.1 || (a - 2 * pi).abs() < 0.1) return 'South';
-    if ((a - pi / 2).abs() < 0.1) return 'West';
-    if ((a - pi).abs() < 0.1 || (a + pi).abs() < 0.1) return 'North';
-    if ((a + pi / 2).abs() < 0.1 || (a - 3 * pi / 2).abs() < 0.1) return 'East';
-    return 'Wall ${i + 1}';
-  }
+  String _wallName(int i) => wallName(_plan, i);
 
   Future<void> _autoDetect() async {
     final images = ref.read(capturedImagesProvider);
@@ -857,7 +573,7 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
     setState(() => _isAnalyzing = true);
     try {
       final imageData = images.first;
-      final dataUrl = imageData.startsWith('data:') ? imageData : 'data:image/jpeg;base64,$imageData';
+      final dataUrl = await fitDataUrlForFirestore(imageData.startsWith('data:') ? imageData : 'data:image/jpeg;base64,$imageData');
       final content = await proxy.chat([
         {
           'role': 'user',
@@ -868,10 +584,12 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
         },
       ]);
       _parseDetection(content);
-    } on AiProxyException catch (e) {
+    } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('Auto-detect failed: ${e.message}'),
+          content: Text(e is AiProxyException
+              ? 'Auto-detect failed: ${e.message}'
+              : 'Auto-detect failed. Please try again.'),
           backgroundColor: Colors.red.shade700,
         ));
       }
@@ -959,15 +677,7 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
     } catch (_) {}
   }
 
-  int _wallIdx(String name) {
-    switch (name.toLowerCase()) {
-      case 'south': return 0;
-      case 'east': return 1;
-      case 'north': return 2;
-      case 'west': return 3;
-      default: return 0;
-    }
-  }
+  int _wallIdx(String name) => _plan.wallIndexForDirection(name) ?? 0;
 
   void _rebuildWalls() {
     final w = _plan.roomWidth;
@@ -1007,10 +717,9 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
             final h = double.tryParse(hc.text);
             if (w != null && d != null && w > 0 && d > 0) {
               setState(() {
-                _plan.roomWidth = w;
-                _plan.roomDepth = d;
+                _cancelPendingWall();
+                _plan.resizeTo(w, d);
                 if (h != null && h > 0) _plan.ceilingHeight = h;
-                _rebuildWalls();
               });
               _save();
             }
@@ -1096,10 +805,7 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
                   const SizedBox(width: 4),
                   _chip('Split', Icons.content_cut, _mode == _Mode.split, cs, () => _toggleMode(_Mode.split)),
                   const SizedBox(width: 4),
-                  _chip('Wall', Icons.add_home_outlined, _mode == _Mode.addWall, cs, () {
-                    setState(() => _addWallCorner1 = null);
-                    _toggleMode(_Mode.addWall);
-                  }),
+                  _chip('Wall', Icons.add_home_outlined, _mode == _Mode.addWall, cs, () => _toggleMode(_Mode.addWall)),
                   const SizedBox(width: 4),
                   _chip('Delete', Icons.delete_sweep_outlined, _mode == _Mode.deleteWall, cs, () => _toggleMode(_Mode.deleteWall), color: cs.error),
                 ],
@@ -1111,16 +817,17 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
                 padding: const EdgeInsets.symmetric(horizontal: 8),
                 child: LayoutBuilder(
                   builder: (context, constraints) {
-                    _ppm = min(
-                      (constraints.maxWidth - 60) / max(_plan.roomWidth, 0.5),
-                      (constraints.maxHeight - 60) / max(_plan.roomDepth, 0.5),
-                    );
-                    final rpW = _plan.roomWidth * _ppm;
-                    final rpH = _plan.roomDepth * _ppm;
-                    _origin = Offset(
-                      (constraints.maxWidth - rpW) / 2,
-                      (constraints.maxHeight - rpH) / 2,
-                    );
+                    if (_dragTarget == _DragTarget.none) {
+                      final b = _plan.bounds;
+                      _ppm = min(
+                        (constraints.maxWidth - 60) / max(b.width, 0.5),
+                        (constraints.maxHeight - 60) / max(b.height, 0.5),
+                      );
+                      _origin = Offset(
+                        constraints.maxWidth / 2 - b.center.dx * _ppm,
+                        constraints.maxHeight / 2 - b.center.dy * _ppm,
+                      );
+                    }
 
                     return GestureDetector(
                       behavior: HitTestBehavior.opaque,
@@ -1183,6 +890,7 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
 
   void _toggleMode(_Mode m) {
     setState(() {
+      _cancelPendingWall();
       _mode = _mode == m ? _Mode.none : m;
       _selectedWall = null;
       _selectedType = '';
@@ -1270,7 +978,7 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
         Expanded(child: Text('Door · ${_wallName(d.wallIndex)}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600))),
         IconButton(onPressed: () => _deleteElement('door', _selectedIdx!), icon: Icon(Icons.delete_outline, size: 18, color: cs.error), visualDensity: VisualDensity.compact, padding: EdgeInsets.zero, constraints: const BoxConstraints()),
       ]),
-      _slider('Position', '${(d.positionAlongWall * 100).round()}%', d.positionAlongWall, 0.05, 0.95, (v) => _updateDoor(_selectedIdx!, pos: v)),
+      _slider('Position', '${(d.positionAlongWall * 100).round()}%', d.positionAlongWall, _posLo(d.wallIndex, d.width), _posHi(d.wallIndex, d.width), (v) => _updateDoor(_selectedIdx!, pos: v)),
       _slider('Width', '${d.width.toStringAsFixed(2)}m', d.width, 0.5, 2.0, (v) => _updateDoor(_selectedIdx!, width: v)),
       _slider('Height', '${d.height.toStringAsFixed(2)}m', d.height, 1.5, 3.0, (v) => _updateDoor(_selectedIdx!, height: v)),
       Row(children: [
@@ -1300,7 +1008,7 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
         Expanded(child: Text('Window · ${_wallName(w.wallIndex)}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600))),
         IconButton(onPressed: () => _deleteElement('window', _selectedIdx!), icon: Icon(Icons.delete_outline, size: 18, color: cs.error), visualDensity: VisualDensity.compact, padding: EdgeInsets.zero, constraints: const BoxConstraints()),
       ]),
-      _slider('Position', '${(w.positionAlongWall * 100).round()}%', w.positionAlongWall, 0.05, 0.95, (v) => _updateWindow(_selectedIdx!, pos: v)),
+      _slider('Position', '${(w.positionAlongWall * 100).round()}%', w.positionAlongWall, _posLo(w.wallIndex, w.width), _posHi(w.wallIndex, w.width), (v) => _updateWindow(_selectedIdx!, pos: v)),
       _slider('Width', '${w.width.toStringAsFixed(2)}m', w.width, 0.3, 4.0, (v) => _updateWindow(_selectedIdx!, width: v)),
       _slider('Height', '${w.height.toStringAsFixed(2)}m', w.height, 0.3, 3.0, (v) => _updateWindow(_selectedIdx!, height: v)),
       Row(children: [
@@ -1330,7 +1038,7 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
         Expanded(child: Text('Outlet · ${_wallName(o.wallIndex)}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600))),
         IconButton(onPressed: () => _deleteElement('outlet', _selectedIdx!), icon: Icon(Icons.delete_outline, size: 18, color: cs.error), visualDensity: VisualDensity.compact, padding: EdgeInsets.zero, constraints: const BoxConstraints()),
       ]),
-      _slider('Position', '${(o.positionAlongWall * 100).round()}%', o.positionAlongWall, 0.05, 0.95, (v) => _updateOutlet(_selectedIdx!, pos: v)),
+      _slider('Position', '${(o.positionAlongWall * 100).round()}%', o.positionAlongWall, _posLo(o.wallIndex, 0.1), _posHi(o.wallIndex, 0.1), (v) => _updateOutlet(_selectedIdx!, pos: v)),
       Row(children: [
         const Text('Type: ', style: TextStyle(fontSize: 10)),
         ...OutletType.values.map((t) => Padding(
@@ -1356,7 +1064,7 @@ class _FloorPlanScreenState extends ConsumerState<FloorPlanScreen> {
         SizedBox(width: 56, child: Text(label, style: TextStyle(fontSize: 10, color: Theme.of(context).colorScheme.onSurfaceVariant))),
         Expanded(child: SliderTheme(
           data: SliderTheme.of(context).copyWith(trackHeight: 2, thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7)),
-          child: Slider(value: value, min: min, max: max, onChanged: onChanged),
+          child: Slider(value: value.clamp(min, max), min: min, max: max, onChanged: onChanged),
         )),
         SizedBox(width: 40, child: Text(val, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600), textAlign: TextAlign.right)),
       ]),
@@ -1415,7 +1123,7 @@ class _FloorPlanPainter extends CustomPainter {
 
     if (plan.walls.isNotEmpty) {
       final path = Path();
-      path.addPolygon(plan.walls.map((w) => w2s(w.start)).toList(), true);
+      path.addPolygon(plan.outline.map(w2s).toList(), true);
       final floorPaint = Paint()..color = cs.primary.withValues(alpha: 0.04);
       canvas.drawPath(path, floorPaint);
     }
@@ -1466,20 +1174,22 @@ class _FloorPlanPainter extends CustomPainter {
     }
 
     if (plan.walls.isNotEmpty) {
-      final rpW = plan.roomWidth * ppm;
-      final rpH = plan.roomDepth * ppm;
+      final b = plan.bounds;
+      final topLeft = w2s(b.topLeft);
+      final rpW = b.width * ppm;
+      final rpH = b.height * ppm;
       final wTp = TextPainter(text: TextSpan(
-        text: '${plan.roomWidth.toStringAsFixed(1)}m',
+        text: '${b.width.toStringAsFixed(1)}m',
         style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: cs.primary),
       ), textDirection: TextDirection.ltr)..layout();
-      wTp.paint(canvas, Offset(origin.dx + rpW / 2 - wTp.width / 2, origin.dy - 16));
+      wTp.paint(canvas, Offset(topLeft.dx + rpW / 2 - wTp.width / 2, topLeft.dy - 30));
 
       final dTp = TextPainter(text: TextSpan(
-        text: '${plan.roomDepth.toStringAsFixed(1)}m',
+        text: '${b.height.toStringAsFixed(1)}m',
         style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: cs.primary),
       ), textDirection: TextDirection.ltr)..layout();
       canvas.save();
-      canvas.translate(origin.dx - 16, origin.dy + rpH / 2);
+      canvas.translate(topLeft.dx - 30, topLeft.dy + rpH / 2);
       canvas.rotate(-pi / 2);
       dTp.paint(canvas, Offset(-dTp.width / 2, 0));
       canvas.restore();
@@ -1554,6 +1264,9 @@ class _FloorPlanPainter extends CustomPainter {
 
     final isRight = door.swing == DoorSwing.right || door.swing == DoorSwing.sliding;
     final sign = isRight ? 1.0 : -1.0;
+    if (door.swing == DoorSwing.left || door.swing == DoorSwing.right) {
+      canvas.translate(-sign * doorWidthPx / 2, 0);
+    }
 
     if (door.swing == DoorSwing.sliding) {
       canvas.drawLine(Offset(-doorWidthPx / 2, -2), Offset(doorWidthPx / 2, -2), leafPaint);
@@ -1742,15 +1455,7 @@ class _FloorPlanPainter extends CustomPainter {
     }
   }
 
-  String _wallLabel(int i) {
-    if (i >= plan.walls.length) return 'Wall ${i + 1}';
-    final a = plan.walls[i].angle;
-    if (a.abs() < 0.1 || (a - 2 * pi).abs() < 0.1) return 'S';
-    if ((a - pi / 2).abs() < 0.1) return 'W';
-    if ((a - pi).abs() < 0.1 || (a + pi).abs() < 0.1) return 'N';
-    if ((a + pi / 2).abs() < 0.1 || (a - 3 * pi / 2).abs() < 0.1) return 'E';
-    return '${i + 1}';
-  }
+  String _wallLabel(int i) => wallName(plan, i, short: true);
 
   @override
   bool shouldRepaint(covariant _FloorPlanPainter old) => true;

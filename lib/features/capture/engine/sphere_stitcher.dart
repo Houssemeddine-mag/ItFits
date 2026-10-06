@@ -43,12 +43,13 @@ double? readFocal35mm(Uint8List jpeg) {
 
 Future<StitchResult> stitchSphereOffline({
   required List<SphereShot> shots,
-  int canvasWidth = 2560,
+  int canvasWidth = 6144,
+  int jpegQuality = 92,
 }) {
   final jobs = shots
       .map((s) => _Job(s.filePath, s.quatRelative, s.focal35mm))
       .toList();
-  return Isolate.run(() => _stitch(jobs, canvasWidth));
+  return Isolate.run(() => _stitch(jobs, canvasWidth, jpegQuality));
 }
 
 class _Job {
@@ -58,12 +59,13 @@ class _Job {
   const _Job(this.path, this.quat, this.focal35);
 }
 
-const int _workingLongEdge = 1280;
+const double _weightScale = 4096;
 
-StitchResult _stitch(List<_Job> jobs, int canvasWidth) {
+StitchResult _stitch(List<_Job> jobs, int canvasWidth, int jpegQuality) {
   final canvasHeight = canvasWidth ~/ 2;
   final pixels = canvasWidth * canvasHeight;
-  final acc = Float32List(pixels * 4);
+  final out = Uint8List(pixels * 3);
+  final weight = Uint16List(pixels);
 
   final cosP = Float64List(canvasHeight), sinP = Float64List(canvasHeight);
   for (var v = 0; v < canvasHeight; v++) {
@@ -78,12 +80,20 @@ StitchResult _stitch(List<_Job> jobs, int canvasWidth) {
     sinY[u] = math.sin(yaw);
   }
 
+  final pxPerRad = canvasWidth / (2 * math.pi);
+
   for (final job in jobs) {
     final raw = File(job.path).readAsBytesSync();
     var decoded = img.decodeImage(raw);
     if (decoded == null) continue;
     decoded = img.bakeOrientation(decoded);
-    final scale = _workingLongEdge / math.max(decoded.width, decoded.height);
+
+    final tanLong = job.focal35 != null
+        ? CameraFov.from35mm(job.focal35!, 1).tanHalfHeight
+        : CameraFov.typical.tanHalfHeight;
+    final targetLong =
+        (2 * math.atan(tanLong) * pxPerRad * 1.25).ceil();
+    final scale = targetLong / math.max(decoded.width, decoded.height);
     final frame = (scale < 1
             ? img.copyResize(decoded,
                 width: (decoded.width * scale).round(),
@@ -91,14 +101,12 @@ StitchResult _stitch(List<_Job> jobs, int canvasWidth) {
                 interpolation: img.Interpolation.average)
             : decoded)
         .convert(format: img.Format.uint8, numChannels: 3);
+    decoded = null;
     final fw = frame.width;
     final fh = frame.height;
     final rgb = frame.getBytes(order: img.ChannelOrder.rgb);
 
     final long = math.max(fw, fh).toDouble();
-    final tanLong = job.focal35 != null
-        ? CameraFov.from35mm(job.focal35!, 1).tanHalfHeight
-        : CameraFov.typical.tanHalfHeight;
     final tanX = tanLong * fw / long;
     final tanY = tanLong * fh / long;
 
@@ -122,7 +130,7 @@ StitchResult _stitch(List<_Job> jobs, int canvasWidth) {
         if (ry < -1 || ry > 1) continue;
 
         final f = (1 - rx.abs()) * (1 - ry.abs());
-        final w = f * f + 1e-6;
+        final w = math.max(1, (f * f * _weightScale).round());
 
         final sx = (rx * 0.5 + 0.5) * (fw - 1);
         final sy = (0.5 - ry * 0.5) * (fh - 1);
@@ -135,29 +143,29 @@ StitchResult _stitch(List<_Job> jobs, int canvasWidth) {
         final w00 = (1 - ax) * (1 - ay), w10 = ax * (1 - ay);
         final w01 = (1 - ax) * ay, w11 = ax * ay;
 
-        final o = (row + u) * 4;
+        final p = row + u;
+        final prev = weight[p];
+        final total = math.min(prev + w, 65535);
+        final mix = w / total;
+        final o = p * 3;
         for (var c = 0; c < 3; c++) {
-          acc[o + c] += w *
-              (rgb[i00 + c] * w00 +
-                  rgb[i10 + c] * w10 +
-                  rgb[i01 + c] * w01 +
-                  rgb[i11 + c] * w11);
+          final sample = rgb[i00 + c] * w00 +
+              rgb[i10 + c] * w10 +
+              rgb[i01 + c] * w01 +
+              rgb[i11 + c] * w11;
+          out[o + c] = (out[o + c] + (sample - out[o + c]) * mix).round().clamp(0, 255);
         }
-        acc[o + 3] += w;
+        weight[p] = total;
       }
     }
   }
 
-  final out = Uint8List(pixels * 3);
   final covered = Uint8List(pixels);
   var coveredCount = 0;
   for (var i = 0; i < pixels; i++) {
-    final w = acc[i * 4 + 3];
-    if (w <= 0) continue;
-    covered[i] = 1;
-    coveredCount++;
-    for (var c = 0; c < 3; c++) {
-      out[i * 3 + c] = (acc[i * 4 + c] / w).round().clamp(0, 255);
+    if (weight[i] > 0) {
+      covered[i] = 1;
+      coveredCount++;
     }
   }
 
@@ -170,7 +178,7 @@ StitchResult _stitch(List<_Job> jobs, int canvasWidth) {
     numChannels: 3,
     order: img.ChannelOrder.rgb,
   );
-  final jpg = Uint8List.fromList(img.encodeJpg(image, quality: 90));
+  final jpg = Uint8List.fromList(img.encodeJpg(image, quality: jpegQuality));
   final tagged = injectGpanoXmp(jpg, canvasWidth, canvasHeight);
   return StitchResult(jpegBytes: tagged, coverage: coveredCount / pixels);
 }

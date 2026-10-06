@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import 'ai_proxy_service.dart';
+import 'firestore_image_service.dart' show fitDataUrlForFirestore;
 import 'prompt_builder.dart';
 import '../models/floor_plan_data.dart';
 
@@ -73,7 +74,7 @@ class AiDesignService {
     if (photo != null && _proxy.isAvailable) {
       try {
         imageUrl = await _proxy.generateDesign(
-          imageDataUrl: photo,
+          imageDataUrl: await fitDataUrlForFirestore(photo),
           prompt: prompt,
           style: style,
           roomType: roomType,

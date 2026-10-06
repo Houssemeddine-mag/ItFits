@@ -71,6 +71,7 @@ class _PanoramaViewerScreenState extends ConsumerState<PanoramaViewerScreen> {
                 panoramaBytes,
                 fit: BoxFit.cover,
                 gaplessPlayback: true,
+                filterQuality: FilterQuality.medium,
               ),
             )
           else

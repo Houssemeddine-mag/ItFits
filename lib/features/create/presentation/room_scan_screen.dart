@@ -42,7 +42,7 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
 
   static const double _alignedDeg = 7.0;
 
-  static const int _workingShortEdge = 960;
+  static const int _workingShortEdge = 1152;
 
   static const double _pxPerDeg = 12.0;
 
@@ -187,6 +187,12 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
         return;
       }
       _cameraController = controller;
+      try {
+        await controller.setJpegImageQuality(100);
+      } catch (_) {}
+      try {
+        await controller.setFlashMode(FlashMode.off);
+      } catch (_) {}
       try {
         await controller.setFocusMode(FocusMode.auto);
       } catch (_) {}
@@ -399,7 +405,7 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
         small,
         minWidth: _workingShortEdge,
         minHeight: _workingShortEdge,
-        quality: 92,
+        quality: 95,
         autoCorrectionAngle: true,
         keepExif: false,
       );
@@ -1238,7 +1244,7 @@ class _RoomScanScreenState extends ConsumerState<RoomScanScreen>
               ),
               const SizedBox(height: 8),
               Text(
-                '${_shots.length} frames • 100% offline on your phone',
+                '${_shots.length} frames • full-resolution 360° • about 30 seconds',
                 style:
                     const TextStyle(color: Colors.white70, fontSize: 13),
                 textAlign: TextAlign.center,
